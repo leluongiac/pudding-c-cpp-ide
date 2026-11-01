@@ -49,6 +49,9 @@ android {
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.5"
     }
+    androidResources {
+        noCompress += "tar.gz"
+    }
 }
 
 dependencies {
@@ -60,4 +63,5 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("org.apache.commons:commons-compress:1.26.1")
 }

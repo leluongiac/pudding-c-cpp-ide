@@ -2,12 +2,7 @@ package com.example.mytexteditor.data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
-import java.net.HttpURLConnection
-import java.net.URL
+import java.io.File
 
 data class ExecutionResult(
     val output: String,
@@ -16,77 +11,110 @@ data class ExecutionResult(
     val executionTimeMs: Long
 )
 
+// 2. Bộ chạy Clang Offline khớp 100% với giao diện cũ
 object CodeRunner {
-    // Wandbox API - Chuyên dụng cho C/C++ GCC, miễn phí và không cần API Key
-    private const val API_URL = "https://wandbox.org/api/compile.json"
+
+    var filesDir: File? = null
+    var cacheDir: File? = null
 
     suspend fun runCpp(code: String, stdin: String = ""): ExecutionResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
-        try {
-            val url = URL(API_URL)
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Accept", "application/json")
-                setRequestProperty("User-Agent", "Mozilla/5.0 (Android; Mobile)")
-                connectTimeout = 10000
-                readTimeout = 20000
-                doOutput = true
-            }
+        val usr = filesDir?.let { File(it, "usr") }
+        val cache = cacheDir
 
-            // Payload chuẩn của Wandbox chạy GCC mới nhất
-            val payload = JSONObject().apply {
-                put("compiler", "gcc-head") // Phiên bản GCC mới nhất
-                put("code", code)
-                put("stdin", stdin)
-                put("options", "c++23")     // Hỗ trợ cả C++23
-            }
-
-            OutputStreamWriter(conn.outputStream).use { it.write(payload.toString()); it.flush() }
-
-            val responseCode = conn.responseCode
-            val stream = if (responseCode in 200..299) conn.inputStream else conn.errorStream
-            val responseText = BufferedReader(InputStreamReader(stream ?: conn.inputStream)).use { it.readText() }
-
+        // Kiểm tra xem đã giải nén Clang chưa
+        if (usr == null || !File(usr, "bin/clang++").exists()) {
             val elapsed = System.currentTimeMillis() - startTime
-            val json = JSONObject(responseText)
+            return@withContext ExecutionResult(
+                output = "Đang cài đặt hoặc chưa tìm thấy Compiler Clang. Vui lòng đợi vài giây rồi thử lại!",
+                isError = true,
+                exitCode = -1,
+                executionTimeMs = elapsed
+            )
+        }
 
-            val status = json.optString("status", "0")
-            val compilerError = json.optString("compiler_error")
-            val programMessage = json.optString("program_message")
-            val programError = json.optString("program_error")
-            val programOutput = json.optString("program_output")
+        val sourceFile = File(cache, "solution.cpp")
+        val outputFile = File(cache, "solution.out")
 
-            // 1. Nếu có lỗi biên dịch (Compile Error từ GCC)
-            if (compilerError.isNotEmpty() && status != "0") {
+        try {
+            // Ghi code ra file tạm
+            sourceFile.writeText(code)
+
+            // --- BƯỚC 1: BIÊN DỊCH BẰNG CLANG++ ---
+            val compileCmd = listOf(
+                "${usr.absolutePath}/bin/clang++",
+                "-target", "aarch64-linux-android",
+                "-isystem", "${usr.absolutePath}/include",
+                "-isystem", "${usr.absolutePath}/include/c++/v1",
+                "-L${usr.absolutePath}/lib",
+                sourceFile.absolutePath,
+                "-o", outputFile.absolutePath
+            )
+
+            val pbCompile = ProcessBuilder(compileCmd)
+            pbCompile.environment()["LD_LIBRARY_PATH"] = "${usr.absolutePath}/lib"
+            pbCompile.environment()["PATH"] = "${usr.absolutePath}/bin:" + System.getenv("PATH")
+            pbCompile.environment()["TMPDIR"] = cache?.absolutePath ?: ""
+
+            val compileProcess = pbCompile.start()
+            val compilerError = compileProcess.errorStream.bufferedReader().readText()
+            val compileExit = compileProcess.waitFor()
+
+            // Nếu biên dịch lỗi (lỗi cú pháp C++)
+            if (compileExit != 0) {
+                val elapsed = System.currentTimeMillis() - startTime
                 return@withContext ExecutionResult(
-                    output = compilerError,
+                    output = "[Lỗi Biên Dịch]:\n$compilerError",
                     isError = true,
-                    exitCode = status.toIntOrNull() ?: 1,
+                    exitCode = compileExit,
                     executionTimeMs = elapsed
                 )
             }
 
-            // 2. Kết quả chạy bình thường
+            // --- BƯỚC 2: CHẠY FILE OUTPUT VỪA BUILD ---
+            outputFile.setExecutable(true, false)
+            val pbRun = ProcessBuilder(outputFile.absolutePath)
+            pbRun.environment()["LD_LIBRARY_PATH"] = "${usr.absolutePath}/lib"
+
+            val runProcess = pbRun.start()
+
+            // Nạp dữ liệu STDIN (nếu có nhập vào ô input)
+            if (stdin.isNotEmpty()) {
+                runProcess.outputStream.bufferedWriter().use { writer ->
+                    writer.write(stdin)
+                    writer.flush()
+                }
+            }
+
+            val programOutput = runProcess.inputStream.bufferedReader().readText()
+            val programError = runProcess.errorStream.bufferedReader().readText()
+            val runExit = runProcess.waitFor()
+            val elapsed = System.currentTimeMillis() - startTime
+
+            // Format kết quả giống hệt logic cũ của bro
             val finalOutput = when {
                 programOutput.isNotEmpty() -> programOutput
-                programMessage.isNotEmpty() -> programMessage
-                compilerError.isNotEmpty() -> "[Warnings]:\n$compilerError\n$programMessage"
+                compilerError.isNotEmpty() -> "[Warnings]:\n$compilerError\n$programOutput"
                 programError.isNotEmpty() -> "[Stderr]:\n$programError"
                 else -> "[Chương trình kết thúc (không có output)]"
             }
 
-            val isSuccess = status == "0"
+            val isSuccess = (runExit == 0)
             return@withContext ExecutionResult(
                 output = finalOutput,
                 isError = !isSuccess,
-                exitCode = status.toIntOrNull() ?: 0,
+                exitCode = runExit,
                 executionTimeMs = elapsed
             )
 
         } catch (e: Exception) {
             val elapsed = System.currentTimeMillis() - startTime
-            ExecutionResult("Lỗi kết nối: ${e.localizedMessage ?: "Timeout"}", true, -1, elapsed)
+            return@withContext ExecutionResult(
+                output = "Lỗi thực thi: ${e.localizedMessage ?: "Unknown Error"}",
+                isError = true,
+                exitCode = -1,
+                executionTimeMs = elapsed
+            )
         }
     }
 }
