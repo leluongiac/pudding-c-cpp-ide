@@ -17,7 +17,7 @@ object CodeRunner {
     var filesDir: File? = null
     var cacheDir: File? = null
 
-    suspend fun runCpp(code: String, stdin: String = ""): ExecutionResult = withContext(Dispatchers.IO) {
+    suspend fun compileCpp(code: String, stdin: String = ""): ExecutionResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         val usr = filesDir?.let { File(it, "usr") }
         val cache = cacheDir
@@ -165,51 +165,12 @@ object CodeRunner {
             } else {
                 AppLog.i("CLANG_RUNNER", "✅ Biên dịch thành công!")
             }
-
-            // --- BƯỚC 2: CHẠY FILE OUTPUT VỪA BUILD ---
-            outputFile.setExecutable(true, false)
-            AppLog.i("CLANG_RUNNER", "▶️ Bắt đầu chạy file nhị phân: ${outputFile.absolutePath}")
-            val pbRun = ProcessBuilder(outputFile.absolutePath)
-            pbRun.environment()["LD_LIBRARY_PATH"] = "${usr.absolutePath}/lib"
-
-            val runProcess = pbRun.start()
-
-            // Nạp dữ liệu STDIN (nếu có nhập vào ô input)
-            if (stdin.isNotEmpty()) {
-                AppLog.d("CLANG_RUNNER", "📥 Nạp STDIN: '$stdin'")
-                runProcess.outputStream.bufferedWriter().use { writer ->
-                    writer.write(stdin)
-                    writer.flush()
-                }
-            }
-
-            val programOutput = runProcess.inputStream.bufferedReader().readText()
-            val programError = runProcess.errorStream.bufferedReader().readText()
-            val runExit = runProcess.waitFor()
-            val elapsed = System.currentTimeMillis() - startTime
-
-            AppLog.i("CLANG_RUNNER", "🏁 Chương trình kết thúc (Exit Code: $runExit, Thời gian: ${elapsed}ms)")
-            if (programOutput.isNotEmpty()) {
-                AppLog.d("CLANG_RUNNER", "📤 STDOUT:\n$programOutput")
-            }
-            if (programError.isNotEmpty()) {
-                AppLog.w("CLANG_RUNNER", "⚠️ STDERR:\n$programError")
-            }
-
-            // Format kết quả giống hệt logic cũ của bro
-            val finalOutput = when {
-                programOutput.isNotEmpty() -> programOutput
-                compilerError.isNotEmpty() -> "[Warnings]:\n$compilerError\n$programOutput"
-                programError.isNotEmpty() -> "[Stderr]:\n$programError"
-                else -> "[Chương trình kết thúc (không có output)]"
-            }
-
-            val isSuccess = (runExit == 0)
+            
             return@withContext ExecutionResult(
-                output = finalOutput,
-                isError = !isSuccess,
-                exitCode = runExit,
-                executionTimeMs = elapsed
+                output = "Biên dịch thành công!",
+                isError = false,
+                exitCode = 0,
+                executionTimeMs = System.currentTimeMillis() - startTime
             )
 
         } catch (e: Exception) {

@@ -31,6 +31,7 @@ fun RightPanel(
     onSave: () -> Unit,
     onSaveAs: () -> Unit,
     onRun: () -> Unit,
+    onStop: () -> Unit, // <--- THÊM HÀM NÀY
     onToggleZen: () -> Unit,
     onMenu: () -> Unit,
     modifier: Modifier = Modifier
@@ -40,7 +41,7 @@ fun RightPanel(
         verticalArrangement = Arrangement.SpaceBetween,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // TOP ACTIONS: Ergonomic Bar (Run -> Save -> Zen Mode -> Menu)
+        // TOP ACTIONS: Ergonomic Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -48,25 +49,27 @@ fun RightPanel(
             horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Nút Run chuẩn GNOME Accent đặt bên ngoài
+            // === NÚT RUN / STOP CHUẨN GNOME STYLE ===
             Box(
                 modifier = Modifier
                     .size(36.dp)
                     .clip(CircleShape)
-                    .background(if (isRunningCode) Color(0xFF383838) else Color(0xFF2EC27E))
-                    .clickable(enabled = !isRunningCode) { onRun() },
+                    // Đang chạy: Đỏ GNOME (0xFFE01B24) | Chưa chạy: Xanh GNOME (0xFF2EC27E)
+                    .background(if (isRunningCode) Color(0xFFE01B24) else Color(0xFF2EC27E))
+                    // Luôn cho phép bấm: Đang chạy thì bấm để Stop, chưa chạy thì bấm để Run
+                    .clickable {
+                        if (isRunningCode) onStop() else onRun()
+                    },
                 contentAlignment = Alignment.Center
             ) {
-                if (isRunningCode) {
-                    Text(text = "⏳", fontSize = 13.sp)
-                } else {
-                    Text(
-                        text = "▶",
-                        color = Color.Black,
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(start = 2.dp)
-                    )
-                }
+                androidx.compose.material3.Icon(
+                    painter = painterResource(
+                        id = if (isRunningCode) R.drawable.ic_stop else R.drawable.ic_play
+                    ),
+                    contentDescription = if (isRunningCode) "Stop" else "Run",
+                    tint = Color.White,
+                    modifier = Modifier.size(16.dp)
+                )
             }
 
             PadIconButton(

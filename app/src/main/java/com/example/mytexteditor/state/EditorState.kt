@@ -107,6 +107,7 @@ class EditorState {
             }
 
             "?123", "123" -> {
+                AppLog.i("KEYBOARD", "👉 ĐÃ VÀO ĐƯỢC ĐÂY, isSymbolMode = true")
                 isSymbolMode = true
                 return
             }

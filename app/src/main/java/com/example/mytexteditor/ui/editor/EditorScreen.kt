@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.mytexteditor.data.TerminalSession
 import com.example.mytexteditor.data.AppLog
 import com.example.mytexteditor.data.CodeRunner
 import com.example.mytexteditor.data.ExecutionResult
@@ -82,16 +83,42 @@ fun EditorScreen() {
     var isRunningCode by remember { mutableStateOf(false) }
     var executionResult by remember { mutableStateOf<ExecutionResult?>(null) }
     var isConsoleVisible by remember { mutableStateOf(false) }
+    var runJob: kotlinx.coroutines.Job? by remember { mutableStateOf(null) }
+    var currentStdin by remember { mutableStateOf("") }
+    val isTerminalRunning by TerminalSession.isRunning.collectAsState()
+    val isRunning = isRunningCode || isTerminalRunning
 
-    val executeCodeAction: (String) -> Unit = { stdin ->
-        AppLog.i("EDITOR_UI", "▶️ Bấm nút RUN C++ (Code: ${state.textFieldValue.text.length} ký tự, STDIN: '$stdin')")
+    val executeCodeAction: (String) -> Unit = { _ ->
+        AppLog.i("EDITOR_UI", "▶️ Bắt đầu Build & Chạy C++")
         isRunningCode = true
         isConsoleVisible = true
-        coroutineScope.launch {
-            val res = CodeRunner.runCpp(state.textFieldValue.text, stdin)
-            executionResult = res
-            isRunningCode = false
-            AppLog.i("EDITOR_UI", "🏁 Hoàn tất RUN: exitCode=${res.exitCode}, isError=${res.isError}, ms=${res.executionTimeMs}")
+
+        // Gán vào runJob để khi bấm nút Stop (màu đỏ) thì hủy được
+        runJob = coroutineScope.launch {
+            try {
+                // 1. BIÊN DỊCH BẰNG CLANG
+                val compileRes = CodeRunner.compileCpp(state.textFieldValue.text)
+
+                if (compileRes.isError) {
+                    // Nếu lỗi biên dịch cú pháp -> in lỗi ra terminal
+                    TerminalSession.showError(compileRes.output)
+                    isRunningCode = false
+                    AppLog.e("EDITOR_UI", "❌ Biên dịch thất bại: ${compileRes.output}")
+                } else {
+                    // 2. BIÊN DỊCH XONG -> CHẠY LIVE SESSION NGAY
+                    val cache = CodeRunner.cacheDir
+                    val usr = CodeRunner.filesDir?.let { java.io.File(it, "usr") }
+                    val outputFile = java.io.File(cache, "solution.out")
+
+                    if (cache != null && usr != null) {
+                        TerminalSession.start(outputFile, usr, this)
+                        isRunningCode = false // Biên dịch xong rồi thì trả về false, nhường quyền theo dõi cho TerminalSession
+                    }
+                }
+            } catch (e: Exception) {
+                TerminalSession.showError("Lỗi hệ thống: ${e.message}")
+                isRunningCode = false
+            }
         }
     }
 
@@ -260,14 +287,43 @@ fun EditorScreen() {
             }
         }
     }
-
-    val onKeyAction = remember(state, context, view) {
+    
+    val onKeyAction = remember(state, context, view, isConsoleVisible, isTerminalRunning) {
         { key: String ->
             AppLog.d("KEYBOARD", "⌨️ Key: '$key' | Cursor: ${state.textFieldValue.selection.start}")
-            state.onKey(key, context)
+
+            if (isConsoleVisible && isTerminalRunning) {
+                when (key) {
+                    "ENTER" -> {
+                        AppLog.i("STDIN", "↵ Gửi STDIN vào C++: '${TerminalSession.currentStdin.value}'")
+                        TerminalSession.submitStdin()
+                    }
+                    "BACKSPACE" -> {
+                        TerminalSession.backspaceStdin()
+                    }
+                    "SPACE" -> {
+                        TerminalSession.appendStdin(" ")
+                    }
+                    "TAB" -> {
+                        TerminalSession.appendStdin("    ")
+                    }
+                    else -> {
+                        if (key.length == 1) {
+                            // Ký tự thường/hoa/số: Nhét vào STDIN
+                            TerminalSession.appendStdin(key)
+                        } else {
+                            // CÁC PHÍM CHUYỂN MODE (?123, SHIFT, CTRL...):
+                            // Trả về cho state xử lý để đổi giao diện bàn phím!
+                            state.onKey(key, context)
+                        }
+                    }
+                }
+            } else {
+                state.onKey(key, context)
+            }
         }
     }
-
+    
     val onJoystickAction = remember(state, haptic) {
         { direction: Direction ->
             AppLog.d("JOYSTICK", "🕹️ Joystick: $direction")
@@ -331,17 +387,31 @@ fun EditorScreen() {
                 exit = shrinkHorizontally(tween(180)) + fadeOut(tween(150)),
                 modifier = Modifier.weight(0.27f).fillMaxHeight()
             ) {
+                
                 RightPanel(
                     rightMode = state.rightMode,
                     isShiftMode = state.isShiftMode,
                     isSymbolMode = state.isSymbolMode,
-                    isRunningCode = isRunningCode,
+                    isRunningCode = isRunning,
                     onKey = onKeyAction,
                     onJoystickDirection = onJoystickAction,
                     onToggleMode = onToggleModeAction,
                     onSave = onSaveAction,
                     onSaveAs = onSaveAsAction,
-                    onRun = { executeCodeAction("") },
+                    
+                    // 1. Khi bấm Run:
+                    onRun = { 
+                        executeCodeAction("") 
+                    },
+
+                    // 2. Chèn thêm onStop ngay đây:
+                    onStop = {
+                        runJob?.cancel()       // Hủy Coroutine đang chạy (nếu có)
+                        TerminalSession.stop()  // Dừng ngay tiến trình C++
+                        // Nếu 'isRunningCode' là biến đổi được thì gán nó về false:
+                        isRunningCode = false 
+                    },
+
                     onToggleZen = { state.isZenMode = true },
                     onMenu = onMenuAction
                 )

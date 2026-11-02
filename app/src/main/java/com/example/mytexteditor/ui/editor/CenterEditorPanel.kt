@@ -402,14 +402,8 @@ fun CenterEditorPanel(
             exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
             modifier = Modifier.align(Alignment.BottomCenter)
         ) {
-            GnomeConsoleSheet(
-                result = executionResult,
-                isRunning = isRunningCode,
-                onClose = onCloseConsole,
-                onReRun = onReRun,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 160.dp, max = 220.dp)
+            GnomeConsoleSheet(  
+                onClose = onCloseConsole
             )
         }
     }
