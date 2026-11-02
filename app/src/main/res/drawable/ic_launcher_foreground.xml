@@ -1,55 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp"
-    android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    
-    <!-- Bóng đổ đáy bánh -->
-    <path
-        android:fillColor="#141414"
-        android:fillAlpha="0.5"
-        android:pathData="M30,82 a24,5 0 1,0 48,0 a24,5 0 1,0 -48,0"/>
+    android:width="128dp"
+    android:height="128dp"
+    android:viewportWidth="128"
+    android:viewportHeight="128">
 
-    <!-- Thân bánh Pudding màu Vàng GNOME Gold -->
+    <!-- Nền khuôn bo góc ứng dụng (Squircle) -->
     <path
-        android:fillColor="#E5A50A"
-        android:pathData="M34,45 L74,45 L81,78 Q81,82 54,82 Q27,82 27,78 Z"/>
+        android:fillColor="#fab387"
+        android:pathData="M 32 4 L 96 4 Q 124 4 124 32 L 124 96 Q 124 124 96 124 L 32 124 Q 4 124 4 96 L 4 32 Q 4 4 32 4 Z" />
 
-    <!-- Mặt bóng bên phải tạo khối 2.5D GNOME -->
-    <path
-        android:fillColor="#C67840"
-        android:fillAlpha="0.4"
-        android:pathData="M54,45 L74,45 L81,78 Q81,82 54,82 Z"/>
+    <group>
+        <!-- Giữ cho toàn bộ các lớp bên trong được bo cong theo squircle -->
+        <clip-path
+            android:pathData="M 32 4 L 96 4 Q 124 4 124 32 L 124 96 Q 124 124 96 124 L 32 124 Q 4 124 4 96 L 4 32 Q 4 4 32 4 Z" />
 
-    <!-- Lớp Caramel trên đỉnh bánh -->
-    <path
-        android:fillColor="#865E3C"
-        android:pathData="M34,45 a20,6 0 1,0 40,0 a20,6 0 1,0 -40,0"/>
+        <!-- Lớp kem Custard pudding -->
+        <path
+            android:fillColor="#f9e2af"
+            android:pathData="M 4 4 H 124 V 124 H 4 V 4 Z" />
 
-    <!-- Dòng Caramel chảy phong cách Geometric Flat -->
-    <path
-        android:strokeColor="#865E3C"
-        android:strokeWidth="4"
-        android:strokeLineCap="round"
-        android:pathData="M39,48 Q42,56 45,48 Q49,58 53,48 Q57,56 61,48 Q65,57 69,48"/>
+        <!-- Bóng đổ phía đáy bánh -->
+        <path
+            android:fillColor="#eba0ac"
+            android:fillAlpha="0.4"
+            android:strokeAlpha="0.4"
+            android:strokeWidth="1"
+            android:pathData="M 64 112 C 97.1370849898 112 124 118.268013502 124 126 C 124 133.731986498 97.1370849898 140 64 140 C 30.8629150102 140 4 133.731986498 4 126 C 4 118.268013502 30.8629150102 112 64 112 Z" />
 
-    <!-- Badge Terminal C++ viền tối -->
-    <path
-        android:fillColor="#1E1E2E"
-        android:pathData="M37,63 h34 v13 h-34 z"/>
+        <!-- Viền bóng caramel -->
+        <path
+            android:strokeColor="#733c2a"
+            android:strokeWidth="4"
+            android:pathData="M 4,4 L 124,4 L 124,42 C 114,42 110,54 98,54 C 90,54 86,40 76,40 C 66,40 64,58 52,58 C 42,58 38,44 28,44 C 18,44 14,48 4,46 Z" />
 
-    <!-- Ký tự 'C' màu Xanh GNOME Accent -->
-    <path
-        android:fillColor="#3584E4"
-        android:pathData="M43,66.5 h4 v1.8 h-2.2 v4.4 h2.2 v1.8 h-4 z"/>
+        <!-- Lớp sốt caramel -->
+        <path
+            android:fillColor="#8c4b35"
+            android:pathData="M 4,4 L 124,4 L 124,38 C 114,38 110,50 98,50 C 90,50 86,36 76,36 C 66,36 64,54 52,54 C 42,54 38,40 28,40 C 18,40 14,45 4,43 Z" />
 
-    <!-- Dấu '+' thứ nhất -->
-    <path
-        android:fillColor="#62A0EA"
-        android:pathData="M50,68.5 h1.2 v1.5 h1.5 v1.2 h-1.5 v1.5 h-1.2 v-1.5 h-1.5 v-1.2 h1.5 z"/>
+        <!-- Vết sáng bóng bề mặt -->
+        <path
+            android:fillColor="#ffffff"
+            android:fillAlpha="0.25"
+            android:strokeAlpha="0.25"
+            android:strokeWidth="1"
+            android:pathData="M 16,12 C 34,7 72,7 94,10 C 96,10 88,14 74,13 C 48,11 26,13 16,16 C 14,16 14,12 16,12 Z" />
 
-    <!-- Dấu '+' thứ hai -->
-    <path
-        android:fillColor="#62A0EA"
-        android:pathData="M55,68.5 h1.2 v1.5 h1.5 v1.2 h-1.5 v1.5 h-1.2 v-1.5 h-1.5 v-1.2 h1.5 z"/>
+        <path
+            android:fillColor="#ffffff"
+            android:fillAlpha="0.2"
+            android:strokeAlpha="0.2"
+            android:strokeWidth="1"
+            android:pathData="M 106 11.5 C 107.380711875 11.5 108.5 12.6192881254 108.5 14 C 108.5 15.3807118746 107.380711875 16.5 106 16.5 C 104.619288125 16.5 103.5 15.3807118746 103.5 14 C 103.5 12.6192881254 104.619288125 11.5 106 11.5 Z" />
+
+        <!-- Cửa sổ Terminal -->
+        <path
+            android:fillColor="#1e1e2e"
+            android:strokeColor="#313244"
+            android:strokeWidth="1.2"
+            android:pathData="M 24 60 L 104 60 Q 113 60 113 69 L 113 97 Q 113 106 104 106 L 24 106 Q 15 106 15 97 L 15 69 Q 15 60 24 60 Z" />
+
+        <!-- Viền sáng trên của Terminal -->
+        <path
+            android:strokeColor="#ffffff"
+            android:strokeAlpha="0.1"
+            android:strokeWidth="1"
+            android:pathData="M 24 61 L 104 61" />
+
+        <!-- Nút đỏ Close -->
+        <path
+            android:fillColor="#f38ba8"
+            android:pathData="M 24 67 C 25.1045694997 67 26 67.8954305003 26 69 C 26 70.1045694997 25.1045694997 71 24 71 C 22.8954305003 71 22 70.1045694997 22 69 C 22 67.8954305003 22.8954305003 67 24 67 Z" />
+
+        <!-- Nút vàng Minimize -->
+        <path
+            android:fillColor="#f9e2af"
+            android:pathData="M 30 67 C 31.1045694997 67 32 67.8954305003 32 69 C 32 70.1045694997 31.1045694997 71 30 71 C 28.8954305003 71 28 70.1045694997 28 69 C 28 67.8954305003 28.8954305003 67 30 67 Z" />
+
+        <!-- Nút xanh lá Maximize -->
+        <path
+            android:fillColor="#a6e3a1"
+            android:pathData="M 36 67 C 37.1045694997 67 38 67.8954305003 38 69 C 38 70.1045694997 37.1045694997 71 36 71 C 34.8954305003 71 34 70.1045694997 34 69 C 34 67.8954305003 34.8954305003 67 36 67 Z" />
+
+        <!-- Phân cách thanh tiêu đề -->
+        <path
+            android:strokeColor="#181825"
+            android:strokeWidth="1"
+            android:pathData="M 15 75 L 113 75" />
+
+        <!-- Dấu nhắc lệnh '>' -->
+        <path
+            android:strokeColor="#fab387"
+            android:strokeWidth="2.3"
+            android:strokeLineJoin="round"
+            android:strokeLineCap="round"
+            android:pathData="M 27.5 83.5 L 34.5 88 L 27.5 92.5" />
+
+        <!-- Con trỏ '_' -->
+        <path
+            android:strokeColor="#fab387"
+            android:strokeWidth="2.3"
+            android:strokeLineJoin="round"
+            android:strokeLineCap="round"
+            android:pathData="M 27.5 96.5 L 35 96.5" />
+
+        <!-- Ký tự 'C' -->
+        <path
+            android:strokeColor="#74c7ec"
+            android:strokeWidth="2.5"
+            android:strokeLineCap="round"
+            android:pathData="M 53 85 C 47 82.5 42.5 86 42.5 90 C 42.5 94 47 97.5 53 95" />
+
+        <!-- Ký tự '/' -->
+        <path
+            android:strokeColor="#6c7086"
+            android:strokeWidth="2.2"
+            android:strokeLineCap="round"
+            android:pathData="M 60.5 96.5 L 64 83.5" />
+
+        <!-- Ký tự 'C' thứ hai -->
+        <path
+            android:strokeColor="#89b4fa"
+            android:strokeWidth="2.5"
+            android:strokeLineCap="round"
+            android:pathData="M 82 85 C 76 82.5 71.5 86 71.5 90 C 71.5 94 76 97.5 82 95" />
+
+        <!-- Dấu '+' thứ nhất -->
+        <path
+            android:strokeColor="#a6e3a1"
+            android:strokeWidth="2.2"
+            android:strokeLineCap="round"
+            android:pathData="M 85 90 L 91 90 M 88 87 L 88 93" />
+
+        <!-- Dấu '+' thứ hai -->
+        <path
+            android:strokeColor="#a6e3a1"
+            android:strokeWidth="2.2"
+            android:strokeLineCap="round"
+            android:pathData="M 94.5 90 L 100.5 90 M 97.5 87 L 97.5 93" />
+
+        <!-- Viền phản quang ngoài cùng -->
+        <path
+            android:strokeColor="#ffffff"
+            android:strokeAlpha="0.3"
+            android:strokeWidth="1.5"
+            android:pathData="M 32 4 L 96 4 Q 124 4 124 32 L 124 96 Q 124 124 96 124 L 32 124 Q 4 124 4 96 L 4 32 Q 4 4 32 4 Z" />
+
+        <!-- Viền bóng tối ngoài cùng -->
+        <path
+            android:strokeColor="#11111b"
+            android:strokeAlpha="0.15"
+            android:strokeWidth="1.5"
+            android:pathData="M 32 4 L 96 4 Q 124 4 124 32 L 124 96 Q 124 124 96 124 L 32 124 Q 4 124 4 96 L 4 32 Q 4 4 32 4 Z" />
+    </group>
 </vector>
