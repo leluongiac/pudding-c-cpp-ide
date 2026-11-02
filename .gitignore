@@ -1,0 +1,59 @@
+# Gradle & Build files
+.gradle/
+build/
+**/build/
+.kotlin/
+*.log
+
+# IDE & Editor files
+.vscode/
+**/.vscode/
+.idea/
+**/.idea/
+*.iml
+misc.xml
+deploymentTargetDropDown.xml
+render.experimental.xml
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Android & C++ Build / Native Artifacs
+captures/
+.externalNativeBuild/
+**/.externalNativeBuild/
+.cxx/
+**/.cxx/
+*.aab
+*.apk
+output-metadata.json
+
+# CMake temporary files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# App Runner & Toolchain temporaries
+temp_toolchain.tar.zst
+*.tar.zst
+solution.out
+solution.cpp
+
+# Keystore files
+*.jks
+*.keystore
+
+# Google Services
+google-services.json
+
+# Profiling & Memory Dumps
+*.hprof
+
+# OS & Editor temp files
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+

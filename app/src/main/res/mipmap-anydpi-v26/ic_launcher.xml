@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Nền xám kim loại tối chuẩn GNOME Adwaita -->
+    <background android:drawable="@color/gnome_bg"/>
+    <!-- Hình bánh Pudding vừa tạo ở Bước 1 -->
+    <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+</adaptive-icon>

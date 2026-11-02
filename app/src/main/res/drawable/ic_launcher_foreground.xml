@@ -1,0 +1,55 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Bóng đổ đáy bánh -->
+    <path
+        android:fillColor="#141414"
+        android:fillAlpha="0.5"
+        android:pathData="M30,82 a24,5 0 1,0 48,0 a24,5 0 1,0 -48,0"/>
+
+    <!-- Thân bánh Pudding màu Vàng GNOME Gold -->
+    <path
+        android:fillColor="#E5A50A"
+        android:pathData="M34,45 L74,45 L81,78 Q81,82 54,82 Q27,82 27,78 Z"/>
+
+    <!-- Mặt bóng bên phải tạo khối 2.5D GNOME -->
+    <path
+        android:fillColor="#C67840"
+        android:fillAlpha="0.4"
+        android:pathData="M54,45 L74,45 L81,78 Q81,82 54,82 Z"/>
+
+    <!-- Lớp Caramel trên đỉnh bánh -->
+    <path
+        android:fillColor="#865E3C"
+        android:pathData="M34,45 a20,6 0 1,0 40,0 a20,6 0 1,0 -40,0"/>
+
+    <!-- Dòng Caramel chảy phong cách Geometric Flat -->
+    <path
+        android:strokeColor="#865E3C"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M39,48 Q42,56 45,48 Q49,58 53,48 Q57,56 61,48 Q65,57 69,48"/>
+
+    <!-- Badge Terminal C++ viền tối -->
+    <path
+        android:fillColor="#1E1E2E"
+        android:pathData="M37,63 h34 v13 h-34 z"/>
+
+    <!-- Ký tự 'C' màu Xanh GNOME Accent -->
+    <path
+        android:fillColor="#3584E4"
+        android:pathData="M43,66.5 h4 v1.8 h-2.2 v4.4 h2.2 v1.8 h-4 z"/>
+
+    <!-- Dấu '+' thứ nhất -->
+    <path
+        android:fillColor="#62A0EA"
+        android:pathData="M50,68.5 h1.2 v1.5 h1.5 v1.2 h-1.5 v1.5 h-1.2 v-1.5 h-1.5 v-1.2 h1.5 z"/>
+
+    <!-- Dấu '+' thứ hai -->
+    <path
+        android:fillColor="#62A0EA"
+        android:pathData="M55,68.5 h1.2 v1.5 h1.5 v1.2 h-1.5 v1.5 h-1.2 v-1.5 h-1.5 v-1.2 h1.5 z"/>
+</vector>
