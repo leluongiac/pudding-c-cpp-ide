@@ -1,5 +1,6 @@
 package com.example.mytexteditor.state
 
+import com.example.mytexteditor.data.AppLog
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import android.content.ClipData
