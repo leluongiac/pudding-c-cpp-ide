@@ -66,4 +66,5 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("org.apache.commons:commons-compress:1.26.1")
     implementation("com.github.luben:zstd-jni:1.5.5-11@aar")
+    testImplementation("junit:junit:4.13.2")
 }

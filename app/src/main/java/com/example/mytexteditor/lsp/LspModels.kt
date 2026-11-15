@@ -26,6 +26,11 @@ enum class CompletionItemKind(val value: Int) {
     }
 }
 
+data class CompletionResult(
+    val isIncomplete: Boolean = false,
+    val items: List<CompletionItem> = emptyList()
+)
+
 data class CompletionItem(
     val label: String,
     val kind: CompletionItemKind = CompletionItemKind.Text,

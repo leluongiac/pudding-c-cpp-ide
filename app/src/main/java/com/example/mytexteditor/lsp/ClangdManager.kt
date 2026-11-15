@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -30,6 +31,8 @@ object ClangdManager {
     @Volatile
     private var isDocumentOpened = false
     private var debounceJob: Job? = null
+    private val syncLock = Any()
+    private var serverSyncKind = 2 // 1: Full, 2: Incremental (mặc định của clangd)
 
     private val _isLspReady = MutableStateFlow(false)
     val isLspReady: StateFlow<Boolean> = _isLspReady.asStateFlow()
@@ -107,11 +110,23 @@ object ClangdManager {
                     scope = scope,
                     onNotification = { method, params ->
                         handleServerNotification(method, params)
+                    },
+                    onClose = { cause ->
+                        handleTransportClosed(cause)
                     }
                 )
                 transport = newTransport
 
-                // 4. Gửi LSP Initialize
+                // Giám sát khi tiến trình clangd đột ngột kết thúc
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        val exitCode = proc.waitFor()
+                        AppLog.w("CLANGD_MGR", "⚠️ Tiến trình clangd đã kết thúc với mã thoát: $exitCode")
+                        handleTransportClosed(IOException("clangd exited with code $exitCode"))
+                    } catch (_: Exception) {}
+                }
+
+                // 4. Gửi LSP Initialize và kiểm tra phản hồi thành công trước khi bật cờ ready
                 initializeLsp(cacheDir)
                 _isLspReady.value = true
                 AppLog.i("CLANGD_MGR", "✅ clangd Language Server đã handshake thành công!")
@@ -128,11 +143,31 @@ object ClangdManager {
         }
     }
 
+    private fun handleTransportClosed(cause: Throwable?) {
+        AppLog.w("CLANGD_MGR", "⚠️ LSP Transport đóng/mất kết nối: ${cause?.message}")
+        _isLspReady.value = false
+        isDocumentOpened = false
+        _currentDiagnostics.value = emptyList()
+        transport = null
+        process?.let { proc ->
+            if (proc.isAlive) {
+                try { proc.destroyForcibly() } catch (_: Exception) {}
+            }
+        }
+        process = null
+    }
+
     private suspend fun initializeLsp(cacheDir: File) {
-        val t = transport ?: return
+        val t = transport ?: throw IOException("LSP Transport chưa sẵn sàng")
 
         val capabilities = JSONObject().apply {
             put("textDocument", JSONObject().apply {
+                put("synchronization", JSONObject().apply {
+                    put("dynamicRegistration", false)
+                    put("willSave", false)
+                    put("willSaveWaitUntil", false)
+                    put("didSave", false)
+                })
                 put("completion", JSONObject().apply {
                     put("completionItem", JSONObject().apply {
                         put("snippetSupport", true)
@@ -154,7 +189,25 @@ object ClangdManager {
             put("capabilities", capabilities)
         }
 
-        t.sendRequest("initialize", initParams)
+        val response = t.sendRequest("initialize", initParams, timeoutMs = 10000)
+        if (response.has("error")) {
+            val errObj = response.optJSONObject("error")
+            val code = errObj?.optInt("code", -1)
+            val msg = errObj?.optString("message", "Lỗi khởi tạo clangd không xác định")
+            throw IOException("clangd initialize thất bại [$code]: $msg")
+        }
+
+        val resultObj = response.optJSONObject("result")
+            ?: throw IOException("Phản hồi initialize từ clangd không có trường 'result'")
+
+        // Xác định chế độ document sync server hỗ trợ
+        val syncCap = resultObj.opt("textDocumentSync")
+        serverSyncKind = when (syncCap) {
+            is Int -> syncCap
+            is JSONObject -> syncCap.optInt("change", 2)
+            else -> 2
+        }
+
         t.sendNotification("initialized", JSONObject())
     }
 
@@ -221,89 +274,178 @@ object ClangdManager {
             AppLog.d("CLANGD_MGR", "⏳ clangd chưa ready, đã lưu pending text (${text.length} ký tự)")
             return
         }
-        sendDidOpen(text)
+
+        synchronized(syncLock) {
+            if (isDocumentOpened) {
+                sendDidClose()
+            }
+            sendDidOpen(text)
+        }
+    }
+
+    private fun sendDidClose() {
+        val t = transport ?: return
+        if (activeDocumentUri.isEmpty() || !isDocumentOpened) return
+        val params = JSONObject().apply {
+            put("textDocument", JSONObject().apply {
+                put("uri", activeDocumentUri)
+            })
+        }
+        t.sendNotification("textDocument/didClose", params)
+        isDocumentOpened = false
     }
 
     private fun sendDidOpen(text: String) {
         val t = transport ?: return
         if (activeDocumentUri.isEmpty()) return
 
-        lastSyncedText = text
-        documentVersion.set(1)
+        synchronized(syncLock) {
+            lastSyncedText = text
+            documentVersion.set(1)
+            pendingChangeText = null
 
-        val params = JSONObject().apply {
-            put("textDocument", JSONObject().apply {
-                put("uri", activeDocumentUri)
-                put("languageId", "cpp")
-                put("version", documentVersion.get())
-                put("text", text)
-            })
+            val params = JSONObject().apply {
+                put("textDocument", JSONObject().apply {
+                    put("uri", activeDocumentUri)
+                    put("languageId", "cpp")
+                    put("version", documentVersion.get())
+                    put("text", text)
+                })
+            }
+            t.sendNotification("textDocument/didOpen", params)
+            isDocumentOpened = true
+            AppLog.i("CLANGD_MGR", "📄 Đã gửi textDocument/didOpen thành công: $activeDocumentUri (${text.length} ký tự)")
         }
-        t.sendNotification("textDocument/didOpen", params)
-        isDocumentOpened = true
-        AppLog.i("CLANGD_MGR", "📄 Đã gửi textDocument/didOpen thành công: $activeDocumentUri (${text.length} ký tự)")
     }
 
     /**
-     * Cập nhật nội dung văn bản (debounce 100-150ms khi gõ thường).
+     * Cập nhật nội dung văn bản (coalescing và debounce 150ms khi gõ thường).
      */
     fun onTextChanged(newText: String) {
-        if (!_isLspReady.value) return
+        if (!_isLspReady.value) {
+            pendingInitialText = newText
+            return
+        }
 
         if (!isDocumentOpened) {
             sendDidOpen(newText)
             return
         }
 
-        if (newText == lastSyncedText) return
+        if (newText == lastSyncedText) {
+            pendingChangeText = null
+            return
+        }
 
         pendingChangeText = newText
         debounceJob?.cancel()
         debounceJob = scope.launch {
-            delay(120)
+            delay(150)
             flushPendingChange()
         }
     }
 
     /**
-     * Đẩy thay đổi mới nhất ngay lập tức tới clangd trước khi gửi completion hoặc signatureHelp.
+     * Tính toán thay đổi incremental giữa 2 phiên bản văn bản theo chuẩn UTF-16 code units của LSP.
+     * Trả về Pair(LspRange, insertedText) hoặc null nếu không thể tính toán.
+     */
+    fun computeIncrementalChange(oldText: String, newText: String): Pair<LspRange, String>? {
+        if (oldText == newText) return null
+
+        val oldLen = oldText.length
+        val newLen = newText.length
+
+        // 1. Tìm độ dài common prefix
+        var prefixLen = 0
+        val maxPrefix = minOf(oldLen, newLen)
+        while (prefixLen < maxPrefix && oldText[prefixLen] == newText[prefixLen]) {
+            prefixLen++
+        }
+
+        // 2. Tìm độ dài common suffix (không chồng lấn với prefix)
+        var suffixLen = 0
+        val maxSuffix = minOf(oldLen - prefixLen, newLen - prefixLen)
+        while (suffixLen < maxSuffix && oldText[oldLen - 1 - suffixLen] == newText[newLen - 1 - suffixLen]) {
+            suffixLen++
+        }
+
+        val startOffset = prefixLen
+        val endOffset = oldLen - suffixLen
+
+        val startPos = LspPositionUtils.offsetToPosition(oldText, startOffset)
+        val endPos = LspPositionUtils.offsetToPosition(oldText, endOffset)
+
+        val insertedText = newText.substring(prefixLen, newLen - suffixLen)
+
+        return Pair(LspRange(startPos, endPos), insertedText)
+    }
+
+    /**
+     * Đẩy thay đổi mới nhất tới clangd (ưu tiên incremental sync, bảo toàn thứ tự và version).
      */
     fun flushPendingChange() {
-        if (!isDocumentOpened) {
-            pendingInitialText?.let { sendDidOpen(it) }
+        synchronized(syncLock) {
+            if (!isDocumentOpened) {
+                pendingInitialText?.let { sendDidOpen(it) }
+                return
+            }
+
+            val textToSync = pendingChangeText ?: return
+            pendingChangeText = null
+            debounceJob?.cancel()
+
+            if (textToSync == lastSyncedText) return
+            val t = transport ?: return
+
+            val oldText = lastSyncedText
+            val newVersion = documentVersion.incrementAndGet()
+            lastSyncedText = textToSync
+
+            val incremental = if (serverSyncKind != 1 && oldText.isNotEmpty()) {
+                computeIncrementalChange(oldText, textToSync)
+            } else {
+                null
+            }
+
+            val changeEvent = JSONObject().apply {
+                if (incremental != null) {
+                    val (range, insertedText) = incremental
+                    put("range", JSONObject().apply {
+                        put("start", JSONObject().apply {
+                            put("line", range.start.line)
+                            put("character", range.start.character)
+                        })
+                        put("end", JSONObject().apply {
+                            put("line", range.end.line)
+                            put("character", range.end.character)
+                        })
+                    })
+                    put("text", insertedText)
+                } else {
+                    put("text", textToSync)
+                }
+            }
+
+            val params = JSONObject().apply {
+                put("textDocument", JSONObject().apply {
+                    put("uri", activeDocumentUri)
+                    put("version", newVersion)
+                })
+                put("contentChanges", JSONArray().apply { put(changeEvent) })
+            }
+            t.sendNotification("textDocument/didChange", params)
         }
-
-        val textToSync = pendingChangeText ?: return
-        pendingChangeText = null
-        debounceJob?.cancel()
-
-        if (textToSync == lastSyncedText) return
-        val t = transport ?: return
-
-        val newVersion = documentVersion.incrementAndGet()
-        lastSyncedText = textToSync
-
-        val changeEvent = JSONObject().apply {
-            put("text", textToSync)
-        }
-        val params = JSONObject().apply {
-            put("textDocument", JSONObject().apply {
-                put("uri", activeDocumentUri)
-                put("version", newVersion)
-            })
-            put("contentChanges", JSONArray().apply { put(changeEvent) })
-        }
-        t.sendNotification("textDocument/didChange", params)
     }
 
     /**
      * Gửi yêu cầu Auto-Completion tới clangd.
      */
-    suspend fun requestCompletion(position: LspPosition): List<CompletionItem> = withContext(Dispatchers.IO) {
-        if (!_isLspReady.value) return@withContext emptyList()
-        val t = transport ?: return@withContext emptyList()
+    suspend fun requestCompletion(position: LspPosition): CompletionResult = withContext(Dispatchers.IO) {
+        if (!_isLspReady.value) return@withContext CompletionResult()
+        val t = transport ?: return@withContext CompletionResult()
 
-        flushPendingChange() // Đảm bảo clangd có text mới nhất!
+        // Đồng bộ các thay đổi chưa flush nếu có
+        flushPendingChange()
 
         try {
             val params = JSONObject().apply {
@@ -314,15 +456,23 @@ object ClangdManager {
                 })
             }
 
-            val response = withTimeoutOrNull(800) {
-                t.sendRequest("textDocument/completion", params)
-            } ?: return@withContext emptyList()
+            val response = try {
+                t.sendRequest("textDocument/completion", params, timeoutMs = 1500)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLog.w("CLANGD_MGR", "Lỗi lấy completion: ${e.message}")
+                return@withContext CompletionResult()
+            }
 
-            val resultObj = response.opt("result") ?: return@withContext emptyList()
-            val itemsArray = when (resultObj) {
-                is JSONArray -> resultObj
-                is JSONObject -> resultObj.optJSONArray("items") ?: JSONArray()
-                else -> JSONArray()
+            val resultObj = response.opt("result") ?: return@withContext CompletionResult()
+            val (itemsArray, isIncomplete) = when (resultObj) {
+                is JSONArray -> Pair(resultObj, false)
+                is JSONObject -> Pair(
+                    resultObj.optJSONArray("items") ?: JSONArray(),
+                    resultObj.optBoolean("isIncomplete", false)
+                )
+                else -> Pair(JSONArray(), false)
             }
 
             val resultList = ArrayList<CompletionItem>(itemsArray.length())
@@ -366,11 +516,13 @@ object ClangdManager {
                 )
             }
 
-            return@withContext resultList
+            return@withContext CompletionResult(isIncomplete = isIncomplete, items = resultList)
 
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLog.e("CLANGD_MGR", "Lỗi lấy completion: ${e.message}")
-            return@withContext emptyList()
+            return@withContext CompletionResult()
         }
     }
 
@@ -381,7 +533,7 @@ object ClangdManager {
         if (!_isLspReady.value) return@withContext null
         val t = transport ?: return@withContext null
 
-        flushPendingChange() // Đảm bảo clangd có text mới nhất!
+        flushPendingChange()
 
         try {
             val params = JSONObject().apply {
@@ -392,9 +544,13 @@ object ClangdManager {
                 })
             }
 
-            val response = withTimeoutOrNull(600) {
-                t.sendRequest("textDocument/signatureHelp", params)
-            } ?: return@withContext null
+            val response = try {
+                t.sendRequest("textDocument/signatureHelp", params, timeoutMs = 1000)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return@withContext null
+            }
 
             val resultObj = response.optJSONObject("result") ?: return@withContext null
             val sigArray = resultObj.optJSONArray("signatures") ?: JSONArray()
@@ -453,6 +609,8 @@ object ClangdManager {
                 activeParameter = activeParamIndex
             )
 
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLog.e("CLANGD_MGR", "Lỗi lấy signature help: ${e.message}")
             return@withContext null
@@ -460,6 +618,7 @@ object ClangdManager {
     }
 
     fun stop() {
+        debounceJob?.cancel()
         try {
             transport?.sendNotification("exit", JSONObject())
             transport?.close()

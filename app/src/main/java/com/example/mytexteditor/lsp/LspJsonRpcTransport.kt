@@ -3,6 +3,7 @@ package com.example.mytexteditor.lsp
 import com.example.mytexteditor.data.AppLog
 import kotlinx.coroutines.*
 import org.json.JSONObject
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.charset.StandardCharsets
@@ -14,13 +15,15 @@ import java.util.concurrent.atomic.AtomicInteger
  * - Framing Content-Length: <bytes>\r\n\r\n<payload>
  * - Đọc stdout và stderr hoàn toàn trên Dispatchers.IO, không bao giờ chặn Main Thread.
  * - Đọc stderr liên tục tránh tràn buffer gây deadlock tiến trình.
+ * - Quản lý vòng đời request, timeout, hủy bỏ $/cancelRequest và thu hồi tài nguyên an toàn.
  */
 class LspJsonRpcTransport(
     private val inputStream: InputStream,
     private val outputStream: OutputStream,
     private val errorStream: InputStream,
     private val scope: CoroutineScope,
-    private val onNotification: (method: String, params: JSONObject) -> Unit
+    private val onNotification: (method: String, params: JSONObject) -> Unit,
+    private val onClose: ((Throwable?) -> Unit)? = null
 ) {
     private val nextRequestId = AtomicInteger(1)
     private val pendingRequests = ConcurrentHashMap<Int, CompletableDeferred<JSONObject>>()
@@ -43,8 +46,17 @@ class LspJsonRpcTransport(
 
     /**
      * Gửi một Request JSON-RPC và đợi Response trả về (bất đồng bộ qua CompletableDeferred).
+     * Có thiết lập timeout, tự động gửi $/cancelRequest khi timeout/hủy bỏ, và luôn dọn dẹp pending request.
      */
-    suspend fun sendRequest(method: String, params: JSONObject): JSONObject {
+    suspend fun sendRequest(
+        method: String,
+        params: JSONObject,
+        timeoutMs: Long = 5000
+    ): JSONObject {
+        if (!isRunning) {
+            throw IOException("LSP Transport đã đóng, không thể gửi yêu cầu: $method")
+        }
+
         val id = nextRequestId.getAndIncrement()
         val deferred = CompletableDeferred<JSONObject>()
         pendingRequests[id] = deferred
@@ -56,40 +68,87 @@ class LspJsonRpcTransport(
             put("params", params)
         }
 
-        sendPayload(json.toString())
-        return deferred.await()
+        try {
+            sendPayload(json.toString())
+        } catch (e: Exception) {
+            pendingRequests.remove(id)
+            deferred.cancel(CancellationException("Không thể gửi yêu cầu LSP: ${e.message}", e))
+            throw e
+        }
+
+        return try {
+            withTimeout(timeoutMs) {
+                deferred.await()
+            }
+        } catch (e: TimeoutCancellationException) {
+            sendCancelRequest(id)
+            throw e
+        } catch (e: CancellationException) {
+            sendCancelRequest(id)
+            throw e
+        } finally {
+            pendingRequests.remove(id)
+        }
     }
 
     /**
      * Gửi một Notification JSON-RPC (không cần Response).
      */
     fun sendNotification(method: String, params: JSONObject) {
+        if (!isRunning) return
         val json = JSONObject().apply {
             put("jsonrpc", "2.0")
             put("method", method)
             put("params", params)
         }
-        sendPayload(json.toString())
+        try {
+            sendPayload(json.toString())
+        } catch (e: Exception) {
+            AppLog.e("LSP_RPC", "Lỗi gửi notification $method: ${e.message}")
+        }
     }
 
-    private fun sendPayload(payload: String) {
+    /**
+     * Gửi thông báo $/cancelRequest chuẩn LSP hủy request đang chờ xử lý trên server.
+     */
+    fun sendCancelRequest(id: Int) {
         if (!isRunning) return
         try {
-            val bytes = payload.toByteArray(StandardCharsets.UTF_8)
-            val header = "Content-Length: ${bytes.size}\r\n\r\n"
-            val headerBytes = header.toByteArray(StandardCharsets.US_ASCII)
+            val json = JSONObject().apply {
+                put("jsonrpc", "2.0")
+                put("method", "$/cancelRequest")
+                put("params", JSONObject().apply { put("id", id) })
+            }
+            sendPayload(json.toString())
+            AppLog.d("LSP_RPC", "🛑 Đã gửi $/cancelRequest cho request ID: $id")
+        } catch (e: Exception) {
+            AppLog.w("LSP_RPC", "Không thể gửi $/cancelRequest cho ID $id: ${e.message}")
+        }
+    }
 
-            synchronized(writeLock) {
+    @Throws(IOException::class)
+    private fun sendPayload(payload: String) {
+        if (!isRunning) throw IOException("LSP Transport đã đóng")
+        val bytes = payload.toByteArray(StandardCharsets.UTF_8)
+        val header = "Content-Length: ${bytes.size}\r\n\r\n"
+        val headerBytes = header.toByteArray(StandardCharsets.US_ASCII)
+
+        synchronized(writeLock) {
+            if (!isRunning) throw IOException("LSP Transport đã đóng")
+            try {
                 outputStream.write(headerBytes)
                 outputStream.write(bytes)
                 outputStream.flush()
+            } catch (e: Exception) {
+                AppLog.e("LSP_RPC", "Lỗi ghi dữ liệu tới clangd: ${e.message}", e)
+                close(e)
+                throw IOException("Lỗi ghi dữ liệu JSON-RPC tới clangd: ${e.message}", e)
             }
-        } catch (e: Exception) {
-            AppLog.e("LSP_RPC", "Lỗi gửi gói tin: ${e.message}")
         }
     }
 
     private fun readStdoutLoop() {
+        var failureCause: Throwable? = null
         try {
             while (isRunning) {
                 // Đọc Header Content-Length
@@ -118,14 +177,18 @@ class LspJsonRpcTransport(
                 if (bytesReadTotal == contentLength) {
                     val bodyString = String(bodyBytes, StandardCharsets.UTF_8)
                     handleMessage(bodyString)
+                } else {
+                    failureCause = IOException("Stream kết thúc đột ngột: đọc $bytesReadTotal / $contentLength bytes")
+                    break
                 }
             }
         } catch (e: Exception) {
             if (isRunning) {
+                failureCause = e
                 AppLog.e("LSP_RPC", "Lỗi vòng lặp đọc stdout: ${e.message}")
             }
         } finally {
-            close()
+            close(failureCause)
         }
     }
 
@@ -184,16 +247,37 @@ class LspJsonRpcTransport(
         }
     }
 
-    fun close() {
-        isRunning = false
-        pendingRequests.values.forEach {
-            it.cancel(CancellationException("LSP Transport đã đóng"))
+    fun close(cause: Throwable? = null) {
+        synchronized(writeLock) {
+            if (!isRunning) return
+            isRunning = false
         }
+
+        val cancelException = CancellationException(
+            cause?.message ?: "LSP Transport đã đóng",
+            cause
+        )
+
+        val pending = ArrayList(pendingRequests.values)
         pendingRequests.clear()
+        pending.forEach { deferred ->
+            deferred.cancel(cancelException)
+        }
+
         try {
             outputStream.close()
+        } catch (_: Exception) {}
+        try {
             inputStream.close()
+        } catch (_: Exception) {}
+        try {
             errorStream.close()
         } catch (_: Exception) {}
+
+        try {
+            onClose?.invoke(cause)
+        } catch (e: Exception) {
+            AppLog.e("LSP_RPC", "Lỗi khi gọi onClose: ${e.message}")
+        }
     }
 }

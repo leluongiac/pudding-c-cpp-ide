@@ -21,6 +21,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Stable
@@ -77,6 +78,10 @@ class EditorState {
     var signatureHelpData by mutableStateOf<SignatureHelp?>(null)
     private var completionJob: Job? = null
     private var signatureJob: Job? = null
+    private var lastQueriedPrefix = ""
+    private var lastQueriedTokenStart = -1
+    private var isServerCompletionIncomplete = true
+    private var completionRequestId = 0
 
     private val undoStack = ArrayDeque<TextFieldValue>()
     private val redoStack = ArrayDeque<TextFieldValue>()
@@ -92,12 +97,29 @@ class EditorState {
 
     fun updateTextFieldValue(newValue: TextFieldValue, markModified: Boolean = true) {
         val textChanged = newValue.text != textFieldValue.text
+        val selectionChanged = newValue.selection != textFieldValue.selection
         if (textChanged) {
             if (markModified) isModified = true
             syntaxHighlighter.updateText(newValue.text)
             ClangdManager.onTextChanged(newValue.text)
         }
         textFieldValue = newValue
+
+        if (selectionChanged && !textChanged) {
+            if (!newValue.selection.collapsed) {
+                isCompletionVisible = false
+                completionJob?.cancel()
+            } else if (isCompletionVisible) {
+                val cursor = newValue.selection.end
+                if (cursor < completionTokenStart || cursor > newValue.text.length) {
+                    isCompletionVisible = false
+                    completionJob?.cancel()
+                } else {
+                    val prefix = newValue.text.substring(completionTokenStart, cursor)
+                    filterCachedCompletions(prefix)
+                }
+            }
+        }
 
         // Cập nhật trạng thái Signature Help theo vị trí con trỏ mới
         checkAndUpdateSignatureHelpVisibility(newValue.text, newValue.selection.end)
@@ -431,18 +453,30 @@ class EditorState {
         when (insertText) {
             " ", ";" -> {
                 isCompletionVisible = false
+                completionJob?.cancel()
+                rawCompletionItems = emptyList()
+                completionItems = emptyList()
                 if (insertText == ";") isSignatureHelpVisible = false
             }
             "(" -> {
                 isCompletionVisible = false
+                completionJob?.cancel()
+                rawCompletionItems = emptyList()
+                completionItems = emptyList()
                 triggerSignatureHelp(newText, newCursor)
             }
             "," -> {
                 isCompletionVisible = false
+                completionJob?.cancel()
+                rawCompletionItems = emptyList()
+                completionItems = emptyList()
                 triggerSignatureHelp(newText, newCursor)
             }
             ")" -> {
                 isCompletionVisible = false
+                completionJob?.cancel()
+                rawCompletionItems = emptyList()
+                completionItems = emptyList()
                 isSignatureHelpVisible = false
             }
             else -> {
@@ -520,8 +554,9 @@ class EditorState {
 
     private fun checkTriggerCompletion(text: String, cursor: Int) {
         val safeCursor = cursor.coerceIn(0, text.length)
-        if (safeCursor == 0) {
+        if (safeCursor == 0 || !textFieldValue.selection.collapsed) {
             isCompletionVisible = false
+            completionJob?.cancel()
             return
         }
 
@@ -552,24 +587,67 @@ class EditorState {
             }
         }
 
-        if (prefix.isNotEmpty() || isTriggerChar) {
-            // Lọc nhanh bằng cache trước để mượt mà không nhấp nháy
-            if (rawCompletionItems.isNotEmpty()) {
-                filterCachedCompletions(prefix)
+        if (!isTriggerChar && prefix.isEmpty()) {
+            isCompletionVisible = false
+            completionJob?.cancel()
+            rawCompletionItems = emptyList()
+            completionItems = emptyList()
+            lastQueriedPrefix = ""
+            lastQueriedTokenStart = -1
+            return
+        }
+
+        // 1. Lọc nhanh bằng cache trước để mượt mà không nhấp nháy
+        if (rawCompletionItems.isNotEmpty()) {
+            filterCachedCompletions(prefix)
+        }
+
+        // 2. Tránh gửi yêu cầu dư thừa nếu prefix không thay đổi ngữ nghĩa và cache đã đầy đủ
+        val canReuseCache = !isTriggerChar &&
+                tokenStart == lastQueriedTokenStart &&
+                rawCompletionItems.isNotEmpty() &&
+                !isServerCompletionIncomplete &&
+                prefix.startsWith(lastQueriedPrefix)
+
+        if (canReuseCache) {
+            return
+        }
+
+        // 3. Debounce yêu cầu tới clangd (khoảng 110ms)
+        val currentReqId = ++completionRequestId
+        completionJob?.cancel()
+        completionJob = coroutineScope.launch {
+            delay(110) // Debounce 100-120 ms
+
+            // Đảm bảo sau delay con trỏ và text vẫn ở trạng thái yêu cầu
+            if (!textFieldValue.selection.collapsed ||
+                textFieldValue.selection.end != safeCursor ||
+                textFieldValue.text != text
+            ) {
+                return@launch
             }
 
-            // Gọi yêu cầu cập nhật từ Clangd
-            completionJob?.cancel()
-            completionJob = coroutineScope.launch {
-                val position = LspPositionUtils.offsetToPosition(text, safeCursor)
-                val items = ClangdManager.requestCompletion(position)
-                if (items.isNotEmpty()) {
-                    rawCompletionItems = items
-                    filterCachedCompletions(prefix)
-                }
+            val position = LspPositionUtils.offsetToPosition(text, safeCursor)
+            val result = ClangdManager.requestCompletion(position)
+
+            // Kiểm tra stale response: text hoặc con trỏ đã thay đổi trong lúc chờ?
+            if (currentReqId != completionRequestId ||
+                textFieldValue.text != text ||
+                textFieldValue.selection.end != safeCursor ||
+                !textFieldValue.selection.collapsed
+            ) {
+                return@launch
             }
-        } else {
-            isCompletionVisible = false
+
+            if (result.items.isNotEmpty()) {
+                rawCompletionItems = result.items
+                isServerCompletionIncomplete = result.isIncomplete
+                lastQueriedPrefix = prefix
+                lastQueriedTokenStart = tokenStart
+                filterCachedCompletions(prefix)
+            } else if (rawCompletionItems.isEmpty()) {
+                isCompletionVisible = false
+            }
         }
     }
 
@@ -596,6 +674,7 @@ class EditorState {
     }
 
     fun acceptCompletion(item: CompletionItem) {
+        completionJob?.cancel()
         pushUndoSnapshot(textFieldValue)
         val text = textFieldValue.text
         val cursor = textFieldValue.selection.end.coerceIn(0, text.length)
@@ -624,6 +703,10 @@ class EditorState {
         val newText = sb.toString()
         updateTextFieldValue(TextFieldValue(newText, TextRange(newCursor)))
         isCompletionVisible = false
+        rawCompletionItems = emptyList()
+        completionItems = emptyList()
+        lastQueriedPrefix = ""
+        lastQueriedTokenStart = -1
 
         if (isCallable) {
             triggerSignatureHelp(newText, newCursor)
@@ -636,6 +719,12 @@ class EditorState {
             val safeCursor = cursor.coerceIn(0, text.length)
             val position = LspPositionUtils.offsetToPosition(text, safeCursor)
             val help = ClangdManager.requestSignatureHelp(position)
+
+            // Đảm bảo không ghi đè dữ liệu cũ nếu văn bản hoặc con trỏ đã thay đổi
+            if (textFieldValue.text != text || textFieldValue.selection.end != safeCursor) {
+                return@launch
+            }
+
             if (help != null && help.signatures.isNotEmpty()) {
                 signatureHelpData = help
                 checkAndUpdateSignatureHelpVisibility(text, safeCursor)
