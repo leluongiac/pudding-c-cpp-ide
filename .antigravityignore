@@ -1,0 +1,43 @@
+# === 1. KẺ ĐỐT TOKEN NẶNG NHẤT (Vendor & Generated C Parser) ===
+# Giữ lại CMakeLists.txt, native-lib.cpp, cpp_highlighter.* nhưng chặn toàn bộ lõi Tree-sitter
+app/src/main/cpp/tree-sitter/
+app/src/main/cpp/tree-sitter-cpp/
+
+# === 2. Android / Gradle / NDK Build Artifacts ===
+.gradle/
+.cxx/
+build/
+app/build/
+.idea/
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.so
+*.o
+*.a
+
+# === 3. Gradle Wrapper & Local Config ===
+gradle/wrapper/gradle-wrapper.jar
+gradlew.bat
+local.properties
+
+# === 4. File tạm Clang Toolchain & Output của App ===
+*.tar.zst
+*.zst
+*.out
+solution.cpp
+solution.out
+
+# === 5. Tài nguyên nhị phân, ảnh & log ===
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.ico
+*.ttf
+*.otf
+*.log
+.git/
