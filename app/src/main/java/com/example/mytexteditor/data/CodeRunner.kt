@@ -11,27 +11,36 @@ data class ExecutionResult(
     val executionTimeMs: Long
 )
 
-// 2. Bộ chạy Clang Offline khớp 100% với giao diện cũ
+/**
+ * Bộ biên dịch và thực thi C++ offline bằng Clang.
+ * Đồng bộ môi trường và đường dẫn với ToolchainEnvironment.
+ */
 object CodeRunner {
 
-    var filesDir: File? = null
-    var cacheDir: File? = null
+    var filesDir: File?
+        get() = ToolchainEnvironment.filesDir
+        set(value) { ToolchainEnvironment.filesDir = value }
+
+    var cacheDir: File?
+        get() = ToolchainEnvironment.cacheDir
+        set(value) { ToolchainEnvironment.cacheDir = value }
 
     suspend fun compileCpp(code: String, stdin: String = ""): ExecutionResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
-        val usr = filesDir?.let { File(it, "usr") }
-        val cache = cacheDir
+        val usr = ToolchainEnvironment.getUsrDir()
+        val cache = ToolchainEnvironment.getCacheDir()
 
         AppLog.i("CLANG_RUNNER", "==================================================")
         AppLog.i("CLANG_RUNNER", "🚀 BẮT ĐẦU YÊU CẦU BIÊN DỊCH & THỰC THI C++")
-        AppLog.d("CLANG_RUNNER", "Độ dài mã nguồn: ${code.length} ký tự, STDIN: '${stdin}'")
+        AppLog.d("CLANG_RUNNER", "Độ dài mã nguồn: ${code.length} ký tự, STDIN: '$stdin'")
         AppLog.d("CLANG_RUNNER", "usr dir: ${usr?.absolutePath}, cache dir: ${cache?.absolutePath}")
 
         // Kiểm tra xem đã giải nén Clang chưa
-        if (usr == null || !File(usr, "bin/clang++").exists()) {
+        val clangPlusPlus = ToolchainEnvironment.getClangPlusPlus()
+        if (usr == null || clangPlusPlus == null || !clangPlusPlus.exists()) {
             val elapsed = System.currentTimeMillis() - startTime
             val errMsg = "Đang cài đặt hoặc chưa tìm thấy Compiler Clang. Vui lòng đợi vài giây rồi thử lại!"
-            AppLog.e("CLANG_RUNNER", "❌ Lỗi: $errMsg (usr=$usr, clang++ exists=${File(usr, "bin/clang++").exists()})")
+            AppLog.e("CLANG_RUNNER", "❌ Lỗi: $errMsg")
             return@withContext ExecutionResult(
                 output = errMsg,
                 isError = true,
@@ -48,17 +57,18 @@ object CodeRunner {
             AppLog.d("CLANG_RUNNER", "📝 Đang ghi mã nguồn vào: ${sourceFile.absolutePath}")
             sourceFile.writeText(code)
             AppLog.d("CLANG_RUNNER", "✅ Đã ghi mã nguồn (${sourceFile.length()} bytes)")
-            
-            // --- ĐẢM BẢO FILE LIBCLANG_RT.BUILTINS.A NẰM ĐÚNG VỊ TRÍ LINKER CẦN ---
+
+            // Đảm bảo runtime libraries và builtins
+            ToolchainEnvironment.verifyRuntimeLibraries()
+
             val clang21Lib = File(usr, "lib/clang/21/lib")
             val expectedDir = File(clang21Lib, "aarch64-unknown-linux-android24")
             val expectedBuiltins = File(expectedDir, "libclang_rt.builtins.a")
 
             if (!expectedBuiltins.exists()) {
                 expectedDir.mkdirs()
-                // Quét tìm file builtins có sẵn trong usr/lib/clang
-                val actualBuiltins = usr.walkTopDown().firstOrNull { 
-                    it.name.contains("builtins") && it.name.endsWith(".a") 
+                val actualBuiltins = usr.walkTopDown().firstOrNull {
+                    it.name.contains("builtins") && it.name.endsWith(".a")
                 }
                 if (actualBuiltins != null) {
                     try {
@@ -70,102 +80,47 @@ object CodeRunner {
                 }
             }
 
-            // --- BƯỚC 1: BIÊN DỊCH BẰNG CLANG++ ---
+            // Lệnh biên dịch Clang++
             val compileCmd = listOf(
-                "${usr.absolutePath}/bin/clang++",
-                "-v",
-                "-target", "aarch64-linux-android24",             // 1. Thêm số 24 chuẩn Termux
-                "-nostdinc++",                                    // 2. Chặn Clang tìm lung tung
-                "-isystem", "${usr.absolutePath}/include/c++/v1", // 3. C++ BẮT BUỘC ĐỨNG ĐẦU
-                "-isystem", "${usr.absolutePath}/include",        // 4. C đứng sau
+                clangPlusPlus.absolutePath,
+                "-target", "aarch64-linux-android24",
+                "-nostdinc++",
+                "-isystem", "${usr.absolutePath}/include/c++/v1",
+                "-isystem", "${usr.absolutePath}/include",
                 "-L${usr.absolutePath}/lib",
                 sourceFile.absolutePath,
                 "-o", outputFile.absolutePath
             )
             AppLog.i("CLANG_RUNNER", "⚙️ Lệnh Clang: ${compileCmd.joinToString(" ")}")
-            
-            val libDir = File(usr, "lib")
-            libDir.setReadable(true, false)
-            libDir.setExecutable(true, false)
-            libDir.listFiles()?.forEach { file ->
-                file.setReadable(true, false)
-                file.setExecutable(true, false)
-            }
-
-            val libFfi = File(libDir, "libffi.so")
-            if (!libFfi.exists()) {
-                // Tự động tìm các file dạng libffi.so.8, libffi.so.7... để tạo symlink sang libffi.so
-                val candidate = libDir.listFiles()?.firstOrNull { it.name.startsWith("libffi.so") }
-                if (candidate != null) {
-                    try {
-                        AppLog.d("CLANG_RUNNER", "🔗 Tạo symlink: ${candidate.name} -> libffi.so")
-                        android.system.Os.symlink(candidate.name, libFfi.absolutePath)
-                    } catch (e: Exception) {
-                        AppLog.w("CLANG_RUNNER", "Cảnh báo không tạo được symlink libffi: ${e.message}")
-                    }
-                } else {
-                    // Nếu trong usr/lib thực sự không có file libffi nào, báo danh sách file để bạn biết
-                    val list = libDir.list()?.take(15)?.joinToString(", ") ?: "trống"
-                    val elapsed = System.currentTimeMillis() - startTime
-                    val errMsg = "[Lỗi thiếu file]: Không thấy libffi.so trong usr/lib!\nDanh sách file hiện có trong lib: $list"
-                    AppLog.e("CLANG_ERROR", errMsg)
-                    return@withContext ExecutionResult(
-                        output = errMsg,
-                        isError = true,
-                        exitCode = -1,
-                        executionTimeMs = elapsed
-                    )
-                }
-            }
-            
-            val libZstd1 = File(libDir, "libzstd.so.1")
-            if (!libZstd1.exists()) {
-                val libZstd = File(libDir, "libzstd.so")
-                if (libZstd.exists()) {
-                    try {
-                        AppLog.d("CLANG_RUNNER", "🔗 Tạo symlink libzstd.so -> libzstd.so.1")
-                        android.system.Os.symlink("libzstd.so", libZstd1.absolutePath)
-                    } catch (_: Exception) {
-                        try {
-                            AppLog.d("CLANG_RUNNER", "📋 Copy dự phòng libzstd.so -> libzstd.so.1")
-                            libZstd.copyTo(libZstd1, overwrite = true)
-                        } catch (e: Exception) {
-                            AppLog.w("CLANG_RUNNER", "Cảnh báo copy libzstd: ${e.message}")
-                        }
-                    }
-                }
-            }
 
             val pbCompile = ProcessBuilder(compileCmd)
-            pbCompile.environment()["LD_LIBRARY_PATH"] = "${usr.absolutePath}/lib"
-            pbCompile.environment()["PATH"] = "${usr.absolutePath}/bin:" + System.getenv("PATH")
-            pbCompile.environment()["TMPDIR"] = cache?.absolutePath ?: ""
+            ToolchainEnvironment.setupEnvironment(pbCompile.environment())
+            pbCompile.redirectErrorStream(true) // Gộp stdout và stderr để đọc an toàn, tránh deadlock buffer
 
             AppLog.i("CLANG_RUNNER", "⏳ Đang chạy quá trình biên dịch Clang++...")
             val compileProcess = pbCompile.start()
-            val compilerError = compileProcess.errorStream.bufferedReader().readText()
+            val compileOutput = compileProcess.inputStream.bufferedReader().readText()
             val compileExit = compileProcess.waitFor()
 
             AppLog.d("CLANG_RUNNER", "Mã thoát biên dịch (Exit Code): $compileExit")
 
-            // Nếu biên dịch lỗi (lỗi cú pháp C++)
             if (compileExit != 0) {
-                AppLog.e("CLANG_ERROR", "❌ BIÊN DỊCH THẤT BẠI (Exit Code $compileExit):\n$compilerError")
+                AppLog.e("CLANG_ERROR", "❌ BIÊN DỊCH THẤT BẠI (Exit Code $compileExit):\n$compileOutput")
                 val elapsed = System.currentTimeMillis() - startTime
                 return@withContext ExecutionResult(
-                    output = "[Lỗi Biên Dịch]:\n$compilerError",
+                    output = "[Lỗi Biên Dịch]:\n$compileOutput",
                     isError = true,
                     exitCode = compileExit,
                     executionTimeMs = elapsed
                 )
             }
 
-            if (compilerError.isNotEmpty()) {
-                AppLog.w("CLANG_RUNNER", "⚠️ Cảnh báo biên dịch (Compiler Warnings):\n$compilerError")
+            if (compileOutput.isNotEmpty()) {
+                AppLog.w("CLANG_RUNNER", "⚠️ Cảnh báo biên dịch:\n$compileOutput")
             } else {
                 AppLog.i("CLANG_RUNNER", "✅ Biên dịch thành công!")
             }
-            
+
             return@withContext ExecutionResult(
                 output = "Biên dịch thành công!",
                 isError = false,

@@ -17,6 +17,8 @@ class MainActivity : ComponentActivity() {
         
         com.example.mytexteditor.data.CodeRunner.filesDir = filesDir
         com.example.mytexteditor.data.CodeRunner.cacheDir = cacheDir
+        com.example.mytexteditor.data.ToolchainEnvironment.filesDir = filesDir
+        com.example.mytexteditor.data.ToolchainEnvironment.cacheDir = cacheDir
         com.example.mytexteditor.data.AppLog.i("MAIN_ACTIVITY", "🚀 MainActivity onCreate! filesDir=${filesDir.absolutePath}, cacheDir=${cacheDir.absolutePath}")
         
         // Ẩn thanh hệ thống (Full màn hình code cho đã mắt)

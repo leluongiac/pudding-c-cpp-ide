@@ -1,6 +1,5 @@
 package com.example.mytexteditor.ui.editor
 
-import com.example.mytexteditor.ui.components.*
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -23,6 +22,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
@@ -34,27 +34,23 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalTextInputService
-import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
-import com.example.mytexteditor.data.ExecutionResult
 import com.example.mytexteditor.data.FileUtils
 import com.example.mytexteditor.state.EditorState
 import com.example.mytexteditor.syntax.TreeSitterVisualTransformation
-import com.example.mytexteditor.ui.components.ChevronDownIcon
-import com.example.mytexteditor.ui.components.ChevronUpIcon
-import com.example.mytexteditor.ui.components.GnomeConsoleSheet
+import com.example.mytexteditor.ui.components.*
 import com.example.mytexteditor.ui.theme.EditorColors
+import kotlin.math.roundToInt
 
 private val GnomeLineHeightStyle = LineHeightStyle(
     alignment = LineHeightStyle.Alignment.Center,
@@ -65,11 +61,8 @@ private val GnomeLineHeightStyle = LineHeightStyle(
 @Composable
 fun CenterEditorPanel(
     state: EditorState,
-    isRunningCode: Boolean,
-    executionResult: ExecutionResult?,
     isConsoleVisible: Boolean,
     onCloseConsole: () -> Unit,
-    onReRun: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var isHeaderExpanded by remember { mutableStateOf(false) }
@@ -98,7 +91,8 @@ fun CenterEditorPanel(
 
     val verticalScrollState = rememberScrollState()
     val codeHorizontalScrollState = rememberScrollState()
-    var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+    var panelSize by remember { mutableStateOf(IntSize.Zero) }
+    var codeAreaSize by remember { mutableStateOf(IntSize.Zero) }
 
     val editorText = state.textFieldValue.text
     val cursorPosition = state.textFieldValue.selection.end.coerceIn(0, editorText.length)
@@ -116,42 +110,56 @@ fun CenterEditorPanel(
         }.toString()
     }
 
-    // Auto scroll theo con trỏ
-    LaunchedEffect(cursorPosition, state.layoutResult, viewportSize) {
+    val topPaddingDp = if (isHeaderExpanded) 68.dp else 26.dp
+    val topPaddingPx = with(density) { topPaddingDp.toPx() }
+    val bottomPaddingPx = with(density) { 16.dp.toPx() }
+    val safePaddingY = with(density) { 32.dp.toPx() }
+    val safePaddingX = with(density) { 36.dp.toPx() }
+
+    // ================= AUTO-SCROLL ĐI THEO CON TRỎ =================
+    // Tính toán viewport thực tế kết hợp TextLayoutResult để viewport luôn bám sát con trỏ
+    LaunchedEffect(cursorPosition, state.layoutResult, panelSize, codeAreaSize, isHeaderExpanded) {
         val layout = state.layoutResult ?: return@LaunchedEffect
-        if (viewportSize.height == 0 || viewportSize.width == 0) return@LaunchedEffect
+        if (panelSize.height == 0 || panelSize.width == 0) return@LaunchedEffect
         if (cursorPosition !in 0..layout.layoutInput.text.length) return@LaunchedEffect
 
         val cursorRect = layout.getCursorRect(cursorPosition)
-        val lineHeightPx = with(density) { currentLineHeight.toPx() }
 
-        val currentScrollY = verticalScrollState.value
-        val viewHeight = viewportSize.height
-        if (cursorRect.top < currentScrollY) {
-            verticalScrollState.scrollTo(cursorRect.top.toInt())
-        } else if (cursorRect.bottom > currentScrollY + viewHeight - lineHeightPx) {
-            verticalScrollState.scrollTo((cursorRect.bottom - viewHeight + lineHeightPx).toInt())
+        // 1. Cuộn dọc (Vertical Auto-Scroll)
+        val visibleHeight = (panelSize.height - topPaddingPx - bottomPaddingPx).coerceAtLeast(100f)
+        val currentScrollY = verticalScrollState.value.toFloat()
+
+        if (cursorRect.top < currentScrollY + safePaddingY) {
+            val targetY = (cursorRect.top - safePaddingY).toInt().coerceAtLeast(0)
+            verticalScrollState.scrollTo(targetY)
+        } else if (cursorRect.bottom > currentScrollY + visibleHeight - safePaddingY) {
+            val targetY = (cursorRect.bottom - visibleHeight + safePaddingY).toInt().coerceAtLeast(0)
+            verticalScrollState.scrollTo(targetY)
         }
 
-        if (!state.isWordWrap) {
-            val currentScrollX = codeHorizontalScrollState.value
-            val viewWidth = viewportSize.width
-            if (cursorRect.left < currentScrollX) {
-                codeHorizontalScrollState.scrollTo(cursorRect.left.toInt().coerceAtLeast(0))
-            } else if (cursorRect.right > currentScrollX + viewWidth - 60) {
-                codeHorizontalScrollState.scrollTo((cursorRect.right - viewWidth + 80).toInt())
+        // 2. Cuộn ngang (Horizontal Auto-Scroll khi tắt Word Wrap)
+        if (!state.isWordWrap && codeAreaSize.width > 0) {
+            val visibleWidth = codeAreaSize.width.toFloat()
+            val currentScrollX = codeHorizontalScrollState.value.toFloat()
+
+            if (cursorRect.left < currentScrollX + safePaddingX) {
+                val targetX = (cursorRect.left - safePaddingX).toInt().coerceAtLeast(0)
+                codeHorizontalScrollState.scrollTo(targetX)
+            } else if (cursorRect.right > currentScrollX + visibleWidth - safePaddingX) {
+                val targetX = (cursorRect.right - visibleWidth + safePaddingX).toInt().coerceAtLeast(0)
+                codeHorizontalScrollState.scrollTo(targetX)
             }
         }
     }
 
-    // GNOME Panel Container: Luôn giữ phong cách GNOME nguyên bản
+    // GNOME Panel Container
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(14.dp))
             .background(EditorColors.editorSurface)
             .border(BorderStroke(1.dp, Color(0xFF333333)), RoundedCornerShape(14.dp))
-            .onSizeChanged { viewportSize = it }
-            // Pinch-to-zoom shortcut: Zoom kích thước không gọi lại Syntax Tokenizer
+            .onSizeChanged { panelSize = it }
+            // Pinch-to-zoom: Phóng to / thu nhỏ cỡ chữ không làm gián đoạn syntax
             .pointerInput(Unit) {
                 detectTransformGestures { _, _, zoom, _ ->
                     if (zoom != 1f) {
@@ -169,7 +177,7 @@ fun CenterEditorPanel(
                     .padding(
                         start = 12.dp,
                         end = 12.dp,
-                        top = if (isHeaderExpanded) 68.dp else 26.dp,
+                        top = topPaddingDp,
                         bottom = 16.dp
                     )
                     .verticalScroll(verticalScrollState)
@@ -181,11 +189,16 @@ fun CenterEditorPanel(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
 
-                // Short-cut layout: Nếu Word Wrap bật thì loại bỏ modifier cuộn ngang -> Tiết kiệm 50% CPU
                 val codeAreaModifier = if (state.isWordWrap) {
-                    Modifier.weight(1f).fillMaxWidth()
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .onSizeChanged { codeAreaSize = it }
                 } else {
-                    Modifier.weight(1f).horizontalScroll(codeHorizontalScrollState)
+                    Modifier
+                        .weight(1f)
+                        .horizontalScroll(codeHorizontalScrollState)
+                        .onSizeChanged { codeAreaSize = it }
                 }
 
                 Box(modifier = codeAreaModifier) {
@@ -205,7 +218,101 @@ fun CenterEditorPanel(
                             lineHeightStyle = GnomeLineHeightStyle
                         ),
                         cursorBrush = SolidColor(EditorColors.accent),
-                        modifier = if (state.isWordWrap) Modifier.fillMaxWidth() else Modifier.width(IntrinsicSize.Max)
+                        modifier = (if (state.isWordWrap) Modifier.fillMaxWidth() else Modifier.width(IntrinsicSize.Max))
+                            .onPreviewKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown) {
+                                    when (event.key) {
+                                        Key.Enter,
+                                        Key.NumPadEnter -> {
+                                            state.onKey("ENTER", context)
+                                            true
+                                        }
+                                        Key.Tab -> {
+                                            state.onKey("TAB", context)
+                                            true
+                                        }
+                                        else -> {
+                                            when (event.utf16CodePoint.toChar()) {
+                                                '{' -> { state.onKey("{", context); true }
+                                                '}' -> { state.onKey("}", context); true }
+                                                '(' -> { state.onKey("(", context); true }
+                                                ')' -> { state.onKey(")", context); true }
+                                                '[' -> { state.onKey("[", context); true }
+                                                ']' -> { state.onKey("]", context); true }
+                                                else -> false
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
+                    )
+                }
+            }
+        }
+
+        // ================= POPUP COMPLETION & SIGNATURE HELP TẠI CON TRỎ =================
+        val layout = state.layoutResult
+        if (layout != null && cursorPosition in 0..layout.layoutInput.text.length && panelSize.width > 0) {
+            val cursorRect = layout.getCursorRect(cursorPosition)
+            val gutterOffsetPx = with(density) { 52.dp.toPx() }
+            val margin12Px = with(density) { 12.dp.toPx() }
+            val padding4Px = with(density) { 4.dp.toPx() }
+            val cursorScreenX = gutterOffsetPx + cursorRect.left - codeHorizontalScrollState.value
+            val cursorScreenY = topPaddingPx + cursorRect.bottom - verticalScrollState.value + padding4Px
+
+            // 1. Completion Popup
+            if (state.isCompletionVisible && state.completionItems.isNotEmpty()) {
+                val popupWidthPx = with(density) { 280.dp.toPx() }
+                val popupMaxHeightPx = with(density) { 190.dp.toPx() }
+
+                val clampedX = cursorScreenX.coerceIn(
+                    margin12Px,
+                    (panelSize.width - popupWidthPx - margin12Px).coerceAtLeast(margin12Px)
+                )
+
+                val clampedY = if (cursorScreenY + popupMaxHeightPx > panelSize.height) {
+                    (topPaddingPx + cursorRect.top - verticalScrollState.value - popupMaxHeightPx).coerceAtLeast(topPaddingPx)
+                } else {
+                    cursorScreenY
+                }
+
+                Box(
+                    modifier = Modifier
+                        .offset { IntOffset(clampedX.roundToInt(), clampedY.roundToInt()) }
+                ) {
+                    CompletionPopup(
+                        items = state.completionItems,
+                        selectedIndex = state.completionSelectedIndex,
+                        onSelectItem = { state.completionSelectedIndex = it },
+                        onAcceptItem = { state.acceptCompletion(it) }
+                    )
+                }
+            }
+
+            // 2. Signature Help Popup (chỉ hiện khi Completion đóng và đang ở trạng thái nhắc nhập)
+            if (!state.isCompletionVisible && state.isSignatureHelpVisible && state.signatureHelpData != null) {
+                val sigWidthPx = with(density) { 280.dp.toPx() }
+                val sigHeightPx = with(density) { 70.dp.toPx() }
+
+                val clampedX = cursorScreenX.coerceIn(
+                    margin12Px,
+                    (panelSize.width - sigWidthPx - margin12Px).coerceAtLeast(margin12Px)
+                )
+
+                val clampedY = if (cursorScreenY + sigHeightPx > panelSize.height) {
+                    (topPaddingPx + cursorRect.top - verticalScrollState.value - sigHeightPx).coerceAtLeast(topPaddingPx)
+                } else {
+                    cursorScreenY
+                }
+
+                Box(
+                    modifier = Modifier
+                        .offset { IntOffset(clampedX.roundToInt(), clampedY.roundToInt()) }
+                ) {
+                    SignatureHelpPopup(
+                        signatureHelp = state.signatureHelpData!!
                     )
                 }
             }
@@ -264,7 +371,7 @@ fun CenterEditorPanel(
                         Text(text = displayDirPath, color = Color(0xFF9A9996), fontSize = 9.sp, fontFamily = FontFamily.Monospace)
                     }
 
-                    // TÍNH NĂNG ĐỌC: NÚT WORD WRAP (Bật / Tắt bẻ dòng)
+                    // Nút Word Wrap
                     Box(
                         modifier = Modifier
                             .size(26.dp)
@@ -320,7 +427,7 @@ fun CenterEditorPanel(
                         }
                     }
 
-                    // NÚT ĐÓNG HEADER
+                    // Nút Đóng Header
                     Box(
                         modifier = Modifier
                             .size(26.dp)
@@ -402,7 +509,7 @@ fun CenterEditorPanel(
             exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
             modifier = Modifier.align(Alignment.BottomCenter)
         ) {
-            GnomeConsoleSheet(  
+            GnomeConsoleSheet(
                 onClose = onCloseConsole
             )
         }

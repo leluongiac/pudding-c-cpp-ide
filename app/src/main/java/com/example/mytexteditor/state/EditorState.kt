@@ -1,8 +1,5 @@
 package com.example.mytexteditor.state
 
-import com.example.mytexteditor.data.AppLog
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -12,20 +9,30 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import com.example.mytexteditor.data.AppLog
+import com.example.mytexteditor.lsp.*
 import com.example.mytexteditor.model.Direction
 import com.example.mytexteditor.model.RightMode
 import com.example.mytexteditor.syntax.AsyncSyntaxHighlighter
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 @Stable
 class EditorState {
+    val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
     var isZenMode by mutableStateOf(false)
     var isWordWrap by mutableStateOf(false)
     var editorFontSize by mutableFloatStateOf(14f)
     var layoutResult: TextLayoutResult? = null
     val syntaxHighlighter = AsyncSyntaxHighlighter()
+
     var textFieldValue by mutableStateOf(
         TextFieldValue(
             text = """
@@ -53,31 +60,52 @@ class EditorState {
     var fileName by mutableStateOf("main.cpp")
     var isModified by mutableStateOf(false)
 
-    init {
-        syntaxHighlighter.updateText(textFieldValue.text)
-    }
-
-    fun updateTextFieldValue(newValue: TextFieldValue, markModified: Boolean = true) {
-        if (newValue.text != textFieldValue.text) {
-            if (markModified) isModified = true
-            syntaxHighlighter.updateText(newValue.text)
-        }
-        textFieldValue = newValue
-    }
-
     var isSelectMode by mutableStateOf(false)
     var rightMode by mutableStateOf(RightMode.TYPING)
     var isShiftMode by mutableStateOf(false)
     var isSymbolMode by mutableStateOf(false)
     var isCtrlPressed by mutableStateOf(false)
 
+    // ================= INTELLISENSE STATE =================
+    var isCompletionVisible by mutableStateOf(false)
+    var rawCompletionItems by mutableStateOf<List<CompletionItem>>(emptyList())
+    var completionItems by mutableStateOf<List<CompletionItem>>(emptyList())
+    var completionSelectedIndex by mutableIntStateOf(0)
+    var completionTokenStart by mutableIntStateOf(0)
+
+    var isSignatureHelpVisible by mutableStateOf(false)
+    var signatureHelpData by mutableStateOf<SignatureHelp?>(null)
+    private var completionJob: Job? = null
+    private var signatureJob: Job? = null
+
     private val undoStack = ArrayDeque<TextFieldValue>()
     private val redoStack = ArrayDeque<TextFieldValue>()
+
+    init {
+        syntaxHighlighter.updateText(textFieldValue.text)
+    }
+
+    fun initLsp(context: Context) {
+        ClangdManager.start(context, textFieldValue.text)
+        ClangdManager.openDocument(textFieldValue.text)
+    }
+
+    fun updateTextFieldValue(newValue: TextFieldValue, markModified: Boolean = true) {
+        val textChanged = newValue.text != textFieldValue.text
+        if (textChanged) {
+            if (markModified) isModified = true
+            syntaxHighlighter.updateText(newValue.text)
+            ClangdManager.onTextChanged(newValue.text)
+        }
+        textFieldValue = newValue
+
+        // Cập nhật trạng thái Signature Help theo vị trí con trỏ mới
+        checkAndUpdateSignatureHelpVisibility(newValue.text, newValue.selection.end)
+    }
 
     fun pushUndoSnapshot(snapshot: TextFieldValue) {
         if (undoStack.isNotEmpty()) {
             val last = undoStack.last()
-            // Kiểm tra nhanh độ dài chuỗi và vị trí con trỏ trước để tránh so sánh toàn bộ string O(N)
             if (last.text.length == snapshot.text.length &&
                 last.selection == snapshot.selection &&
                 last.text == snapshot.text
@@ -97,18 +125,16 @@ class EditorState {
         redoStack.clear()
     }
 
+    // ================= XỬ LÝ PHÍM & SHORTCUTS =================
     fun onKey(key: String, context: Context) {
-        // haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-
         when (key) {
             "SHIFT" -> {
                 isShiftMode = !isShiftMode
-                isSelectMode = isShiftMode // Merged Shift & Text Selection
+                isSelectMode = isShiftMode
                 return
             }
 
             "?123", "123" -> {
-                AppLog.i("KEYBOARD", "👉 ĐÃ VÀO ĐƯỢC ĐÂY, isSymbolMode = true")
                 isSymbolMode = true
                 return
             }
@@ -133,6 +159,7 @@ class EditorState {
                     if (undoStack.isNotEmpty()) {
                         redoStack.addLast(textFieldValue)
                         updateTextFieldValue(undoStack.removeLast())
+                        isCompletionVisible = false
                         Toast.makeText(context, "Hoàn tác (Undo)", Toast.LENGTH_SHORT).show()
                     } else {
                         Toast.makeText(context, "Không còn thao tác để hoàn tác", Toast.LENGTH_SHORT).show()
@@ -146,6 +173,7 @@ class EditorState {
                     if (redoStack.isNotEmpty()) {
                         undoStack.addLast(textFieldValue)
                         updateTextFieldValue(redoStack.removeLast())
+                        isCompletionVisible = false
                         Toast.makeText(context, "Làm lại (Redo)", Toast.LENGTH_SHORT).show()
                     } else {
                         Toast.makeText(context, "Không còn thao tác để làm lại", Toast.LENGTH_SHORT).show()
@@ -189,6 +217,7 @@ class EditorState {
                             val max = selection.max
                             val newText = StringBuilder(text).replace(min, max, pasteText).toString()
                             updateTextFieldValue(TextFieldValue(newText, TextRange(min + pasteText.length)))
+                            isCompletionVisible = false
                             Toast.makeText(context, "Đã dán (Paste)", Toast.LENGTH_SHORT).show()
                         }
                     }
@@ -226,61 +255,225 @@ class EditorState {
                             Toast.makeText(context, "Đã cắt dòng (Cut)", Toast.LENGTH_SHORT).show()
                         }
                     }
+                    isCompletionVisible = false
                     isCtrlPressed = false
                     return
                 }
 
                 else -> {
-                    // Other key clears CTRL latch and processes normally
                     isCtrlPressed = false
                 }
             }
         }
 
-        // Before normal typing/backspacing, record undo state
-        if (key in listOf("SPACE", "ENTER", "ENT", "BACKSPACE", "⌫", "TAB")) {
+        // ================= XỬ LÝ PHÍM ENTER =================
+        if (key == "ENTER" || key == "ENT") {
+            // NẾU COMPLETION POPUP ĐANG MỞ -> ƯU TIÊN ACCEPT ITEM ĐANG CHỌN
+            if (isCompletionVisible && completionItems.isNotEmpty()) {
+                val selectedItem = completionItems.getOrNull(completionSelectedIndex) ?: completionItems.first()
+                acceptCompletion(selectedItem)
+                return
+            }
+
+            // NẾU KHÔNG CÓ POPUP -> AUTO-INDENT THÔNG MINH
             pushUndoSnapshot(textFieldValue)
+            val newIndentedValue = CppAutoIndent.handleEnter(textFieldValue)
+            updateTextFieldValue(newIndentedValue)
+            isCompletionVisible = false
+            return
         }
 
-        val text = textFieldValue.text
-        val selection = textFieldValue.selection
-
-        if (key == "BACKSPACE" || key == "⌫") {
+        // ================= AUTO-CLOSE PAIR '{' =================
+        if (key == "{") {
+            pushUndoSnapshot(textFieldValue)
+            val text = textFieldValue.text
+            val selection = textFieldValue.selection
             if (selection.collapsed) {
-                if (selection.start > 0) {
-                    val start = selection.start
-                    val newText = StringBuilder(text).delete(start - 1, start).toString()
-                    updateTextFieldValue(TextFieldValue(newText, TextRange(start - 1)))
+                val pos = selection.start
+                val newText = StringBuilder(text).insert(pos, "{}").toString()
+                updateTextFieldValue(TextFieldValue(newText, TextRange(pos + 1)))
+            } else {
+                val min = selection.min
+                val max = selection.max
+                val selected = text.substring(min, max)
+                val newText = StringBuilder(text).replace(min, max, "{$selected}").toString()
+                updateTextFieldValue(TextFieldValue(newText, TextRange(min + 1, max + 1)))
+            }
+            isCompletionVisible = false
+            return
+        }
+
+        // ================= AUTO-CLOSE PAIR '(' =================
+        if (key == "(") {
+            pushUndoSnapshot(textFieldValue)
+            val text = textFieldValue.text
+            val selection = textFieldValue.selection
+            if (selection.collapsed) {
+                val pos = selection.start
+                val newText = StringBuilder(text).insert(pos, "()").toString()
+                updateTextFieldValue(TextFieldValue(newText, TextRange(pos + 1)))
+                triggerSignatureHelp(newText, pos + 1)
+            } else {
+                val min = selection.min
+                val max = selection.max
+                val selected = text.substring(min, max)
+                val newText = StringBuilder(text).replace(min, max, "($selected)").toString()
+                updateTextFieldValue(TextFieldValue(newText, TextRange(min + 1, max + 1)))
+            }
+            isCompletionVisible = false
+            return
+        }
+
+        // ================= AUTO-CLOSE PAIR '[' =================
+        if (key == "[") {
+            pushUndoSnapshot(textFieldValue)
+            val text = textFieldValue.text
+            val selection = textFieldValue.selection
+            if (selection.collapsed) {
+                val pos = selection.start
+                val newText = StringBuilder(text).insert(pos, "[]").toString()
+                updateTextFieldValue(TextFieldValue(newText, TextRange(pos + 1)))
+            } else {
+                val min = selection.min
+                val max = selection.max
+                val selected = text.substring(min, max)
+                val newText = StringBuilder(text).replace(min, max, "[$selected]").toString()
+                updateTextFieldValue(TextFieldValue(newText, TextRange(min + 1, max + 1)))
+            }
+            isCompletionVisible = false
+            return
+        }
+
+        // ================= SKIP CLOSING CHAR NẾU ĐÃ CÓ SẴN NGAY SAU CON TRỎ =================
+        if (key in listOf("}", ")", "]")) {
+            val text = textFieldValue.text
+            val selection = textFieldValue.selection
+            if (selection.collapsed && selection.start < text.length && text[selection.start].toString() == key) {
+                val newPos = selection.start + 1
+                updateTextFieldValue(TextFieldValue(text, TextRange(newPos)))
+                if (key == ")") isSignatureHelpVisible = false
+                isCompletionVisible = false
+                return
+            }
+        }
+
+        // ================= XỬ LÝ PHÍM '}' (AUTO-UNINDENT) =================
+        if (key == "}") {
+            pushUndoSnapshot(textFieldValue)
+            val newBraceValue = CppAutoIndent.handleClosingBrace(textFieldValue)
+            updateTextFieldValue(newBraceValue)
+            isCompletionVisible = false
+            return
+        }
+
+        // ================= PHÍM BACKSPACE =================
+        if (key == "BACKSPACE" || key == "⌫") {
+            pushUndoSnapshot(textFieldValue)
+            val text = textFieldValue.text
+            val selection = textFieldValue.selection
+
+            if (selection.collapsed) {
+                val start = selection.start
+                if (start > 0) {
+                    val isPair = start < text.length && (
+                        (text[start - 1] == '{' && text[start] == '}') ||
+                        (text[start - 1] == '(' && text[start] == ')') ||
+                        (text[start - 1] == '[' && text[start] == ']') ||
+                        (text[start - 1] == '"' && text[start] == '"') ||
+                        (text[start - 1] == '\'' && text[start] == '\'')
+                    )
+                    val newText = if (isPair) {
+                        StringBuilder(text).delete(start - 1, start + 1).toString()
+                    } else {
+                        StringBuilder(text).delete(start - 1, start).toString()
+                    }
+                    val newPos = start - 1
+                    updateTextFieldValue(TextFieldValue(newText, TextRange(newPos)))
+                    checkTriggerCompletion(newText, newPos)
                 }
             } else {
                 val min = selection.min
                 val max = selection.max
                 val newText = StringBuilder(text).delete(min, max).toString()
                 updateTextFieldValue(TextFieldValue(newText, TextRange(min)))
+                isCompletionVisible = false
             }
-        } else {
-            val insertText = when (key) {
-                "SPACE" -> " "
-                "TAB" -> "    "
-                "ENTER", "ENT" -> "\n"
-                else -> {
-                    if (key.length == 1 && key.first().isLetter()) {
-                        if (isShiftMode) key.uppercase() else key.lowercase()
-                    } else {
-                        key
-                    }
+            return
+        }
+
+        // ================= CÁC PHÍM GÕ VĂN BẢN KHÁC =================
+        if (key in listOf("SPACE", "TAB")) {
+            pushUndoSnapshot(textFieldValue)
+        }
+
+        val text = textFieldValue.text
+        val selection = textFieldValue.selection
+
+        val insertText = when (key) {
+            "SPACE" -> " "
+            "TAB" -> "    "
+            else -> {
+                if (key.length == 1 && key.first().isLetter()) {
+                    if (isShiftMode) key.uppercase() else key.lowercase()
+                } else {
+                    key
                 }
             }
-            val min = selection.min
-            val max = selection.max
-            val newText = StringBuilder(text).replace(min, max, insertText).toString()
-            updateTextFieldValue(TextFieldValue(newText, TextRange(min + insertText.length)))
+        }
+
+        val min = selection.min
+        val max = selection.max
+        val newText = StringBuilder(text).replace(min, max, insertText).toString()
+        val newCursor = min + insertText.length
+        updateTextFieldValue(TextFieldValue(newText, TextRange(newCursor)))
+
+        // Phản ứng IntelliSense theo ký tự vừa gõ
+        when (insertText) {
+            " ", ";" -> {
+                isCompletionVisible = false
+                if (insertText == ";") isSignatureHelpVisible = false
+            }
+            "(" -> {
+                isCompletionVisible = false
+                triggerSignatureHelp(newText, newCursor)
+            }
+            "," -> {
+                isCompletionVisible = false
+                triggerSignatureHelp(newText, newCursor)
+            }
+            ")" -> {
+                isCompletionVisible = false
+                isSignatureHelpVisible = false
+            }
+            else -> {
+                checkTriggerCompletion(newText, newCursor)
+            }
         }
     }
 
+    // ================= ĐIỀU HƯỚNG BẰNG JOYSTICK =================
     fun onJoystickDirection(direction: Direction, haptic: HapticFeedback) {
         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
 
+        // NẾU COMPLETION POPUP ĐANG HIỂN THỊ -> ĐIỀU HƯỚNG TRONG POPUP
+        if (isCompletionVisible && completionItems.isNotEmpty()) {
+            when (direction) {
+                Direction.UP -> {
+                    completionSelectedIndex = (completionSelectedIndex - 1).coerceAtLeast(0)
+                    return
+                }
+                Direction.DOWN -> {
+                    completionSelectedIndex = (completionSelectedIndex + 1).coerceAtMost(completionItems.size - 1)
+                    return
+                }
+                Direction.LEFT, Direction.RIGHT -> {
+                    // Bỏ qua trôi nhẹ sang trái/phải để không tắt popup hay chạy con trỏ chữ
+                    return
+                }
+            }
+        }
+
+        // NẾU KHÔNG CÓ COMPLETION -> DI CHUYỂN CON TRỎ TEXT
         val text = textFieldValue.text
         val selection = textFieldValue.selection
         val currentCursor = selection.end
@@ -307,7 +500,6 @@ class EditorState {
                         val y = (layout.getLineTop(targetLine) + layout.getLineBottom(targetLine)) / 2f
                         newCursor = layout.getOffsetForPosition(Offset(x, y))
                     } else {
-                        // SỬA TẠI ĐÂY: Nếu vượt biên thì nhảy về kịch đầu hoặc kịch cuối
                         newCursor = if (direction == Direction.UP) 0 else text.length
                     }
                 }
@@ -321,6 +513,200 @@ class EditorState {
         }
 
         textFieldValue = textFieldValue.copy(selection = newSelection)
+        checkAndUpdateSignatureHelpVisibility(text, newCursor)
+    }
+
+    // ================= LOGIC COMPLETION & SIGNATURE HELP =================
+
+    private fun checkTriggerCompletion(text: String, cursor: Int) {
+        val safeCursor = cursor.coerceIn(0, text.length)
+        if (safeCursor == 0) {
+            isCompletionVisible = false
+            return
+        }
+
+        // Tìm token prefix trước con trỏ
+        var tokenStart = safeCursor
+        while (tokenStart > 0) {
+            val ch = text[tokenStart - 1]
+            if (ch.isLetterOrDigit() || ch == '_') {
+                tokenStart--
+            } else {
+                break
+            }
+        }
+
+        val prefix = text.substring(tokenStart, safeCursor)
+        completionTokenStart = tokenStart
+
+        // Kiểm tra trigger char: ., ->, ::, <
+        var isTriggerChar = false
+        if (tokenStart > 0) {
+            val prevChar = text[tokenStart - 1]
+            if (prevChar == '.' || prevChar == '<') {
+                isTriggerChar = true
+            } else if (prevChar == '>' && tokenStart >= 2 && text[tokenStart - 2] == '-') {
+                isTriggerChar = true
+            } else if (prevChar == ':' && tokenStart >= 2 && text[tokenStart - 2] == ':') {
+                isTriggerChar = true
+            }
+        }
+
+        if (prefix.isNotEmpty() || isTriggerChar) {
+            // Lọc nhanh bằng cache trước để mượt mà không nhấp nháy
+            if (rawCompletionItems.isNotEmpty()) {
+                filterCachedCompletions(prefix)
+            }
+
+            // Gọi yêu cầu cập nhật từ Clangd
+            completionJob?.cancel()
+            completionJob = coroutineScope.launch {
+                val position = LspPositionUtils.offsetToPosition(text, safeCursor)
+                val items = ClangdManager.requestCompletion(position)
+                if (items.isNotEmpty()) {
+                    rawCompletionItems = items
+                    filterCachedCompletions(prefix)
+                }
+            }
+        } else {
+            isCompletionVisible = false
+        }
+    }
+
+    private fun filterCachedCompletions(prefix: String) {
+        if (prefix.isEmpty()) {
+            completionItems = rawCompletionItems
+            completionSelectedIndex = 0
+            isCompletionVisible = rawCompletionItems.isNotEmpty()
+            return
+        }
+
+        val filtered = rawCompletionItems.filter { item ->
+            item.filterText?.contains(prefix, ignoreCase = true) == true ||
+            item.label.contains(prefix, ignoreCase = true)
+        }
+
+        if (filtered.isNotEmpty()) {
+            completionItems = filtered
+            completionSelectedIndex = completionSelectedIndex.coerceIn(0, filtered.size - 1)
+            isCompletionVisible = true
+        } else {
+            isCompletionVisible = false
+        }
+    }
+
+    fun acceptCompletion(item: CompletionItem) {
+        pushUndoSnapshot(textFieldValue)
+        val text = textFieldValue.text
+        val cursor = textFieldValue.selection.end.coerceIn(0, text.length)
+        val tokenStart = completionTokenStart.coerceIn(0, cursor)
+
+        val cleanInsert = LspPositionUtils.cleanSnippet(item.insertText ?: item.label)
+        val isCallable = item.kind in listOf(
+            CompletionItemKind.Function,
+            CompletionItemKind.Method,
+            CompletionItemKind.Constructor
+        )
+
+        val sb = StringBuilder(text)
+        sb.replace(tokenStart, cursor, cleanInsert)
+        var newCursor = tokenStart + cleanInsert.length
+
+        // Nếu là hàm / method: tự động chèn () và đặt con trỏ vào giữa nếu chưa có
+        if (isCallable) {
+            val hasOpenParenAfter = newCursor < sb.length && sb[newCursor] == '('
+            if (!hasOpenParenAfter && !cleanInsert.endsWith("()")) {
+                sb.insert(newCursor, "()")
+                newCursor += 1 // Đặt con trỏ ở giữa '(' và ')'
+            }
+        }
+
+        val newText = sb.toString()
+        updateTextFieldValue(TextFieldValue(newText, TextRange(newCursor)))
+        isCompletionVisible = false
+
+        if (isCallable) {
+            triggerSignatureHelp(newText, newCursor)
+        }
+    }
+
+    fun triggerSignatureHelp(text: String, cursor: Int) {
+        signatureJob?.cancel()
+        signatureJob = coroutineScope.launch {
+            val safeCursor = cursor.coerceIn(0, text.length)
+            val position = LspPositionUtils.offsetToPosition(text, safeCursor)
+            val help = ClangdManager.requestSignatureHelp(position)
+            if (help != null && help.signatures.isNotEmpty()) {
+                signatureHelpData = help
+                checkAndUpdateSignatureHelpVisibility(text, safeCursor)
+            } else {
+                isSignatureHelpVisible = false
+            }
+        }
+    }
+
+    private fun checkAndUpdateSignatureHelpVisibility(text: String, cursor: Int) {
+        val safeCursor = cursor.coerceIn(0, text.length)
+        if (signatureHelpData == null || signatureHelpData?.signatures.isNullOrEmpty()) {
+            isSignatureHelpVisible = false
+            return
+        }
+
+        // Tìm dấu '(' mở bao ngoài con trỏ
+        var parenDepth = 0
+        var openParenIndex = -1
+        var lastCommaIndex = -1
+
+        var i = safeCursor - 1
+        while (i >= 0) {
+            val ch = text[i]
+            if (ch == ')') {
+                parenDepth++
+            } else if (ch == '(') {
+                if (parenDepth > 0) {
+                    parenDepth--
+                } else {
+                    openParenIndex = i
+                    break
+                }
+            } else if (ch == ',' && parenDepth == 0 && lastCommaIndex == -1) {
+                lastCommaIndex = i
+            } else if (ch == '\n' || ch == ';') {
+                break
+            }
+            i--
+        }
+
+        if (openParenIndex == -1) {
+            isSignatureHelpVisible = false
+            return
+        }
+
+        // Kiểm tra xem vị trí con trỏ có còn nằm trước dấu ')' đóng không
+        val closeParenIndex = text.indexOf(')', openParenIndex)
+        if (closeParenIndex != -1 && safeCursor > closeParenIndex) {
+            isSignatureHelpVisible = false
+            return
+        }
+
+        // Đoạn text của đối số hiện tại từ '(' hoặc ',' gần nhất tới con trỏ
+        val argStart = (lastCommaIndex.takeIf { it != -1 } ?: openParenIndex) + 1
+        val currentArgText = if (argStart <= safeCursor) text.substring(argStart, safeCursor) else ""
+
+        // QUY TẮC TINH TẾ:
+        // - Trạng thái nhắc nhập: ngay sau '(' hoặc ',' (chỉ chứa khoảng trắng) -> HIỆN POPUP
+        // - Trạng thái đang gõ bên trong đối số (đã có ký tự non-whitespace) -> ẨN POPUP để không che code
+        if (currentArgText.isBlank()) {
+            // Kiểm tra diagnostics nếu có lỗi cú pháp sai loại tại đây
+            val hasError = ClangdManager.currentDiagnostics.value.any { diag ->
+                diag.severity == DiagnosticSeverity.Error &&
+                (diag.message.contains("no matching function", ignoreCase = true) ||
+                 diag.message.contains("too many arguments", ignoreCase = true))
+            }
+            isSignatureHelpVisible = !hasError
+        } else {
+            isSignatureHelpVisible = false
+        }
     }
 
     private fun getFallbackUp(text: String, cursor: Int): Int {

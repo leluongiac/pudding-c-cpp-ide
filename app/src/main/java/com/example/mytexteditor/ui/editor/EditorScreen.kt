@@ -10,9 +10,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -24,17 +24,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import com.example.mytexteditor.data.TerminalSession
 import com.example.mytexteditor.data.AppLog
 import com.example.mytexteditor.data.CodeRunner
-import com.example.mytexteditor.data.ExecutionResult
 import com.example.mytexteditor.data.FileUtils
+import com.example.mytexteditor.data.TerminalSession
 import com.example.mytexteditor.data.ToolchainInstaller
 import com.example.mytexteditor.model.Direction
 import com.example.mytexteditor.model.RightMode
@@ -51,7 +51,7 @@ fun EditorScreen() {
     val haptic = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
 
-    // ================= TOOLCHAIN INSTALLER STATE =================
+    // ================= TOOLCHAIN & LSP STATE =================
     var isToolchainReady by remember { mutableStateOf(ToolchainInstaller.isInstalled(context)) }
     var toolchainStatus by remember { mutableStateOf("Đang chuẩn bị...") }
 
@@ -61,12 +61,19 @@ fun EditorScreen() {
             ToolchainInstaller.installIfNeeded(
                 context = context,
                 onStatusUpdate = { status ->
-                    toolchainStatus = status // Cập nhật text lên màn hình
+                    toolchainStatus = status
                 },
                 onComplete = {
-                    isToolchainReady = true // Tải xong tự động mở khóa app
+                    isToolchainReady = true
                 }
             )
+        }
+    }
+
+    // Khi Toolchain sẵn sàng -> Khởi chạy LSP Clangd
+    LaunchedEffect(isToolchainReady) {
+        if (isToolchainReady) {
+            state.initLsp(context)
         }
     }
 
@@ -81,10 +88,8 @@ fun EditorScreen() {
 
     // RUNNER STATE
     var isRunningCode by remember { mutableStateOf(false) }
-    var executionResult by remember { mutableStateOf<ExecutionResult?>(null) }
     var isConsoleVisible by remember { mutableStateOf(false) }
     var runJob: kotlinx.coroutines.Job? by remember { mutableStateOf(null) }
-    var currentStdin by remember { mutableStateOf("") }
     val isTerminalRunning by TerminalSession.isRunning.collectAsState()
     val isRunning = isRunningCode || isTerminalRunning
 
@@ -93,14 +98,12 @@ fun EditorScreen() {
         isRunningCode = true
         isConsoleVisible = true
 
-        // Gán vào runJob để khi bấm nút Stop (màu đỏ) thì hủy được
         runJob = coroutineScope.launch {
             try {
                 // 1. BIÊN DỊCH BẰNG CLANG
                 val compileRes = CodeRunner.compileCpp(state.textFieldValue.text)
 
                 if (compileRes.isError) {
-                    // Nếu lỗi biên dịch cú pháp -> in lỗi ra terminal
                     TerminalSession.showError(compileRes.output)
                     isRunningCode = false
                     AppLog.e("EDITOR_UI", "❌ Biên dịch thất bại: ${compileRes.output}")
@@ -112,7 +115,7 @@ fun EditorScreen() {
 
                     if (cache != null && usr != null) {
                         TerminalSession.start(outputFile, usr, this)
-                        isRunningCode = false // Biên dịch xong rồi thì trả về false, nhường quyền theo dõi cho TerminalSession
+                        isRunningCode = false
                     }
                 }
             } catch (e: Exception) {
@@ -123,6 +126,7 @@ fun EditorScreen() {
     }
 
     var showNewFileDialog by remember { mutableStateOf(false) }
+    var showMenuDialog by remember { mutableStateOf(false) }
     var pendingNewFileAfterSave by remember { mutableStateOf(false) }
 
     val openDocumentLauncher = rememberLauncherForActivityResult(
@@ -134,7 +138,7 @@ fun EditorScreen() {
                 val content = context.contentResolver.openInputStream(uri)?.use { inputStream ->
                     inputStream.bufferedReader(Charsets.UTF_8).readText()
                 } ?: ""
-                val name = FileUtils.getFileName(context, uri) ?: "untitled.kt"
+                val name = FileUtils.getFileName(context, uri) ?: "untitled.cpp"
                 state.currentUri = uri
                 state.fileName = name
                 state.updateTextFieldValue(TextFieldValue(content, TextRange(0)), markModified = false)
@@ -162,7 +166,7 @@ fun EditorScreen() {
                 if (pendingNewFileAfterSave) {
                     pendingNewFileAfterSave = false
                     state.currentUri = null
-                    state.fileName = "untitled.kt"
+                    state.fileName = "untitled.cpp"
                     state.updateTextFieldValue(TextFieldValue("", TextRange(0)), markModified = false)
                     state.clearHistory()
                     state.isModified = false
@@ -210,7 +214,7 @@ fun EditorScreen() {
             showNewFileDialog = true
         } else {
             state.currentUri = null
-            state.fileName = "untitled.kt"
+            state.fileName = "untitled.cpp"
             state.updateTextFieldValue(TextFieldValue("", TextRange(0)), markModified = false)
             state.clearHistory()
             state.isModified = false
@@ -222,11 +226,12 @@ fun EditorScreen() {
         AppLog.d("FILE_OPS", "📂 Yêu cầu Mở file (Open File Picker)")
         openDocumentLauncher.launch(arrayOf("*/*"))
     }
+
     val onMenuAction = {
-        AppLog.d("EDITOR_UI", "📋 Bấm Menu")
-        Toast.makeText(context, "Menu (Tính năng sẽ cập nhật)", Toast.LENGTH_SHORT).show()
+        showMenuDialog = true
     }
 
+    // ================= DIALOG TẠO FILE MỚI =================
     if (showNewFileDialog) {
         Dialog(
             onDismissRequest = { showNewFileDialog = false },
@@ -255,7 +260,7 @@ fun EditorScreen() {
                             onClick = {
                                 showNewFileDialog = false
                                 state.currentUri = null
-                                state.fileName = "untitled.kt"
+                                state.fileName = "untitled.cpp"
                                 state.updateTextFieldValue(TextFieldValue("", TextRange(0)), markModified = false)
                                 state.clearHistory()
                                 state.isModified = false
@@ -271,7 +276,7 @@ fun EditorScreen() {
                                     val success = FileUtils.saveToFile(context, state.currentUri!!, state.textFieldValue.text)
                                     if (success) {
                                         state.currentUri = null
-                                        state.fileName = "untitled.kt"
+                                        state.fileName = "untitled.cpp"
                                         state.updateTextFieldValue(TextFieldValue("", TextRange(0)), markModified = false)
                                         state.clearHistory()
                                         state.isModified = false
@@ -287,7 +292,133 @@ fun EditorScreen() {
             }
         }
     }
-    
+
+    // ================= MENU DIALOG GNOME (TÍCH HỢP NÚT CẬP NHẬT TOOLCHAIN CLANGD) =================
+    if (showMenuDialog) {
+        val isClangdInstalled = ToolchainInstaller.isClangdInstalled(context)
+
+        Dialog(
+            onDismissRequest = { showMenuDialog = false },
+            properties = DialogProperties(dismissOnBackPress = true, dismissOnClickOutside = true)
+        ) {
+            Box(
+                modifier = Modifier
+                    .widthIn(min = 300.dp, max = 380.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color(0xFF242424))
+                    .border(BorderStroke(1.dp, Color(0xFF3E3E3E)), RoundedCornerShape(18.dp))
+                    .padding(20.dp)
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Text(
+                        text = "Menu Pudding IDE",
+                        color = Color.White,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    // Trạng thái IntelliSense Clangd
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF1E1E1E))
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(
+                                text = "IntelliSense (clangd)",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = if (isClangdInstalled) "Hoạt động (Auto-completion + Signature)" else "Chưa có binary clangd",
+                                color = if (isClangdInstalled) Color(0xFF2EC27E) else Color(0xFFF38BA8),
+                                fontSize = 11.sp
+                            )
+                        }
+
+                        if (!isClangdInstalled) {
+                            HeaderActionPill(
+                                text = "Cập nhật",
+                                isAccent = true,
+                                onClick = {
+                                    showMenuDialog = false
+                                    isToolchainReady = false
+                                    toolchainStatus = "Đang kết nối lại GitHub..."
+                                    ToolchainInstaller.reinstall(
+                                        context = context,
+                                        onStatusUpdate = { status -> toolchainStatus = status },
+                                        onComplete = {
+                                            isToolchainReady = true
+                                            state.initLsp(context)
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    }
+
+                    // Tùy chọn file nhanh
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF1E1E1E))
+                            .padding(vertical = 4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    showMenuDialog = false
+                                    onNewFileAction()
+                                }
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(text = "Tạo file mới", color = Color.White, fontSize = 13.sp)
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    showMenuDialog = false
+                                    onOpenFileAction()
+                                }
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(text = "Mở file...", color = Color.White, fontSize = 13.sp)
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    showMenuDialog = false
+                                    onSaveAction()
+                                }
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(text = "Lưu file", color = Color.White, fontSize = 13.sp)
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        HeaderActionPill(text = "Đóng", onClick = { showMenuDialog = false })
+                    }
+                }
+            }
+        }
+    }
+
     val onKeyAction = remember(state, context, view, isConsoleVisible, isTerminalRunning) {
         { key: String ->
             AppLog.d("KEYBOARD", "⌨️ Key: '$key' | Cursor: ${state.textFieldValue.selection.start}")
@@ -309,11 +440,8 @@ fun EditorScreen() {
                     }
                     else -> {
                         if (key.length == 1) {
-                            // Ký tự thường/hoa/số: Nhét vào STDIN
                             TerminalSession.appendStdin(key)
                         } else {
-                            // CÁC PHÍM CHUYỂN MODE (?123, SHIFT, CTRL...):
-                            // Trả về cho state xử lý để đổi giao diện bàn phím!
                             state.onKey(key, context)
                         }
                     }
@@ -323,7 +451,7 @@ fun EditorScreen() {
             }
         }
     }
-    
+
     val onJoystickAction = remember(state, haptic) {
         { direction: Direction ->
             AppLog.d("JOYSTICK", "🕹️ Joystick: $direction")
@@ -339,9 +467,7 @@ fun EditorScreen() {
         }
     }
 
-    // Bọc toàn bộ màn hình vào Box để có thể hiện Popup tải nếu cần
     Box(modifier = Modifier.fillMaxSize()) {
-
         // GNOME Split Container
         Row(
             modifier = Modifier
@@ -370,11 +496,8 @@ fun EditorScreen() {
             // CENTER EDITOR PANEL (Tràn viền 100% khi Zen Mode)
             CenterEditorPanel(
                 state = state,
-                isRunningCode = isRunningCode,
-                executionResult = executionResult,
                 isConsoleVisible = isConsoleVisible,
                 onCloseConsole = { isConsoleVisible = false },
-                onReRun = { stdin -> executeCodeAction(stdin) },
                 modifier = Modifier
                     .weight(if (state.isZenMode) 1f else 0.46f)
                     .fillMaxHeight()
@@ -387,7 +510,6 @@ fun EditorScreen() {
                 exit = shrinkHorizontally(tween(180)) + fadeOut(tween(150)),
                 modifier = Modifier.weight(0.27f).fillMaxHeight()
             ) {
-                
                 RightPanel(
                     rightMode = state.rightMode,
                     isShiftMode = state.isShiftMode,
@@ -398,20 +520,12 @@ fun EditorScreen() {
                     onToggleMode = onToggleModeAction,
                     onSave = onSaveAction,
                     onSaveAs = onSaveAsAction,
-                    
-                    // 1. Khi bấm Run:
-                    onRun = { 
-                        executeCodeAction("") 
-                    },
-
-                    // 2. Chèn thêm onStop ngay đây:
+                    onRun = { executeCodeAction("") },
                     onStop = {
-                        runJob?.cancel()       // Hủy Coroutine đang chạy (nếu có)
-                        TerminalSession.stop()  // Dừng ngay tiến trình C++
-                        // Nếu 'isRunningCode' là biến đổi được thì gán nó về false:
-                        isRunningCode = false 
+                        runJob?.cancel()
+                        TerminalSession.stop()
+                        isRunningCode = false
                     },
-
                     onToggleZen = { state.isZenMode = true },
                     onMenu = onMenuAction
                 )
@@ -423,7 +537,7 @@ fun EditorScreen() {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.75f)), // Làm mờ nền phía sau
+                    .background(Color.Black.copy(alpha = 0.75f)),
                 contentAlignment = Alignment.Center
             ) {
                 Box(
@@ -468,7 +582,10 @@ fun EditorScreen() {
                                     ToolchainInstaller.installIfNeeded(
                                         context = context,
                                         onStatusUpdate = { status -> toolchainStatus = status },
-                                        onComplete = { isToolchainReady = true }
+                                        onComplete = {
+                                            isToolchainReady = true
+                                            state.initLsp(context)
+                                        }
                                     )
                                 },
                                 colors = androidx.compose.material3.ButtonDefaults.buttonColors(

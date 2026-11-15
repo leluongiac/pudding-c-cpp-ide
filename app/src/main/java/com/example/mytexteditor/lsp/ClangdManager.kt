@@ -1,0 +1,476 @@
+package com.example.mytexteditor.lsp
+
+import android.content.Context
+import com.example.mytexteditor.data.AppLog
+import com.example.mytexteditor.data.ToolchainEnvironment
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * Quản lý vòng đời, kết nối và yêu cầu LSP tới tiến trình clangd binary.
+ * Hỗ trợ Graceful Fallback hoàn toàn: nếu thiếu clangd thì app không crash.
+ */
+object ClangdManager {
+
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var transport: LspJsonRpcTransport? = null
+    private var process: Process? = null
+
+    private val documentVersion = AtomicInteger(1)
+    private var activeDocumentUri: String = ""
+    private var lastSyncedText: String = ""
+    private var pendingChangeText: String? = null
+    private var pendingInitialText: String? = null
+    @Volatile
+    private var isDocumentOpened = false
+    private var debounceJob: Job? = null
+
+    private val _isLspReady = MutableStateFlow(false)
+    val isLspReady: StateFlow<Boolean> = _isLspReady.asStateFlow()
+
+    private val _currentDiagnostics = MutableStateFlow<List<Diagnostic>>(emptyList())
+    val currentDiagnostics: StateFlow<List<Diagnostic>> = _currentDiagnostics.asStateFlow()
+
+    private fun toFileUri(file: File): String {
+        val path = file.absolutePath
+        return if (path.startsWith("/")) "file://$path" else "file:///$path"
+    }
+
+    /**
+     * Khởi chạy clangd nếu có sẵn binary và môi trường hợp lệ.
+     */
+    fun start(context: Context, initialText: String? = null) {
+        if (initialText != null) {
+            pendingInitialText = initialText
+        }
+
+        if (_isLspReady.value || process?.isAlive == true) {
+            if (_isLspReady.value && initialText != null && !isDocumentOpened) {
+                sendDidOpen(initialText)
+            }
+            return
+        }
+
+        scope.launch {
+            try {
+                ToolchainEnvironment.verifyRuntimeLibraries(context)
+
+                val clangdFile = ToolchainEnvironment.getClangd(context)
+                if (clangdFile == null || !clangdFile.exists() || !clangdFile.canExecute()) {
+                    AppLog.w("CLANGD_MGR", "⚠️ Binary clangd chưa sẵn sàng hoặc không có quyền thực thi. Tắt tính năng LSP an toàn.")
+                    _isLspReady.value = false
+                    return@launch
+                }
+
+                val usrDir = ToolchainEnvironment.getUsrDir(context) ?: return@launch
+                val cacheDir = ToolchainEnvironment.getCacheDir(context) ?: return@launch
+
+                // 1. Tự động sinh compile_commands.json chuẩn cho C++17 và Android Clang
+                generateCompileCommands(cacheDir, usrDir)
+
+                // 2. Tạo file mẫu solution.cpp chuẩn để clangd theo dõi
+                val dummyFile = File(cacheDir, "solution.cpp")
+                if (!dummyFile.exists() || dummyFile.length() == 0L) {
+                    val defaultContent = pendingInitialText ?: "// Clangd workspace ready\n"
+                    dummyFile.writeText(defaultContent)
+                }
+                activeDocumentUri = toFileUri(dummyFile)
+                AppLog.d("CLANGD_MGR", "📍 Active Document URI: $activeDocumentUri")
+
+                // 3. Khởi chạy tiến trình clangd với các cờ tối ưu hóa cho mobile
+                val cmd = listOf(
+                    clangdFile.absolutePath,
+                    "--background-index=false",
+                    "--pch-storage=memory",
+                    "--header-insertion=never",
+                    "--completion-style=detailed",
+                    "--compile-commands-dir=${cacheDir.absolutePath}"
+                )
+
+                val pb = ProcessBuilder(cmd)
+                ToolchainEnvironment.setupEnvironment(pb.environment(), context)
+
+                AppLog.i("CLANGD_MGR", "🚀 Khởi chạy clangd: ${cmd.joinToString(" ")}")
+                val proc = pb.start()
+                process = proc
+
+                val newTransport = LspJsonRpcTransport(
+                    inputStream = proc.inputStream,
+                    outputStream = proc.outputStream,
+                    errorStream = proc.errorStream,
+                    scope = scope,
+                    onNotification = { method, params ->
+                        handleServerNotification(method, params)
+                    }
+                )
+                transport = newTransport
+
+                // 4. Gửi LSP Initialize
+                initializeLsp(cacheDir)
+                _isLspReady.value = true
+                AppLog.i("CLANGD_MGR", "✅ clangd Language Server đã handshake thành công!")
+
+                // 5. GỬI NGAY textDocument/didOpen CHO TÀI LIỆU
+                val textToOpen = pendingInitialText ?: dummyFile.readText()
+                sendDidOpen(textToOpen)
+
+            } catch (e: Exception) {
+                AppLog.e("CLANGD_MGR", "💥 Không thể khởi chạy clangd: ${e.message}", e)
+                _isLspReady.value = false
+                stop()
+            }
+        }
+    }
+
+    private suspend fun initializeLsp(cacheDir: File) {
+        val t = transport ?: return
+
+        val capabilities = JSONObject().apply {
+            put("textDocument", JSONObject().apply {
+                put("completion", JSONObject().apply {
+                    put("completionItem", JSONObject().apply {
+                        put("snippetSupport", true)
+                    })
+                })
+                put("signatureHelp", JSONObject().apply {
+                    put("signatureInformation", JSONObject().apply {
+                        put("parameterInformation", JSONObject().apply {
+                            put("labelOffsetSupport", false)
+                        })
+                    })
+                })
+            })
+        }
+
+        val initParams = JSONObject().apply {
+            put("processId", android.os.Process.myPid())
+            put("rootUri", toFileUri(cacheDir))
+            put("capabilities", capabilities)
+        }
+
+        t.sendRequest("initialize", initParams)
+        t.sendNotification("initialized", JSONObject())
+    }
+
+    private fun handleServerNotification(method: String, params: JSONObject) {
+        when (method) {
+            "textDocument/publishDiagnostics" -> {
+                val diagArray = params.optJSONArray("diagnostics") ?: JSONArray()
+                val list = mutableListOf<Diagnostic>()
+
+                for (i in 0 until diagArray.length()) {
+                    val d = diagArray.getJSONObject(i)
+                    val rangeObj = d.getJSONObject("range")
+                    val startObj = rangeObj.getJSONObject("start")
+                    val endObj = rangeObj.getJSONObject("end")
+
+                    val range = LspRange(
+                        start = LspPosition(startObj.getInt("line"), startObj.getInt("character")),
+                        end = LspPosition(endObj.getInt("line"), endObj.getInt("character"))
+                    )
+                    val severity = DiagnosticSeverity.fromInt(d.optInt("severity", 1))
+                    val message = d.optString("message", "")
+                    val source = d.optString("source", "clangd")
+
+                    list.add(Diagnostic(range, severity, message, source))
+                }
+
+                _currentDiagnostics.value = list
+            }
+        }
+    }
+
+    private fun generateCompileCommands(cacheDir: File, usrDir: File) {
+        val compileCommandsFile = File(cacheDir, "compile_commands.json")
+        val solutionFile = File(cacheDir, "solution.cpp")
+
+        val command = StringBuilder().apply {
+            append("${usrDir.absolutePath}/bin/clang++ ")
+            append("-target aarch64-linux-android24 ")
+            append("-nostdinc++ ")
+            append("-isystem ${usrDir.absolutePath}/include/c++/v1 ")
+            append("-isystem ${usrDir.absolutePath}/include ")
+            append("-std=c++17 ")
+            append("-c solution.cpp")
+        }.toString()
+
+        val jsonArray = JSONArray().apply {
+            put(JSONObject().apply {
+                put("directory", cacheDir.absolutePath)
+                put("command", command)
+                put("file", solutionFile.absolutePath)
+            })
+        }
+
+        compileCommandsFile.writeText(jsonArray.toString(2))
+        AppLog.d("CLANGD_MGR", "📄 Đã tạo compile_commands.json tại: ${compileCommandsFile.absolutePath}")
+    }
+
+    /**
+     * Mở tài liệu C++ vào LSP session.
+     */
+    fun openDocument(text: String) {
+        pendingInitialText = text
+        if (!_isLspReady.value) {
+            AppLog.d("CLANGD_MGR", "⏳ clangd chưa ready, đã lưu pending text (${text.length} ký tự)")
+            return
+        }
+        sendDidOpen(text)
+    }
+
+    private fun sendDidOpen(text: String) {
+        val t = transport ?: return
+        if (activeDocumentUri.isEmpty()) return
+
+        lastSyncedText = text
+        documentVersion.set(1)
+
+        val params = JSONObject().apply {
+            put("textDocument", JSONObject().apply {
+                put("uri", activeDocumentUri)
+                put("languageId", "cpp")
+                put("version", documentVersion.get())
+                put("text", text)
+            })
+        }
+        t.sendNotification("textDocument/didOpen", params)
+        isDocumentOpened = true
+        AppLog.i("CLANGD_MGR", "📄 Đã gửi textDocument/didOpen thành công: $activeDocumentUri (${text.length} ký tự)")
+    }
+
+    /**
+     * Cập nhật nội dung văn bản (debounce 100-150ms khi gõ thường).
+     */
+    fun onTextChanged(newText: String) {
+        if (!_isLspReady.value) return
+
+        if (!isDocumentOpened) {
+            sendDidOpen(newText)
+            return
+        }
+
+        if (newText == lastSyncedText) return
+
+        pendingChangeText = newText
+        debounceJob?.cancel()
+        debounceJob = scope.launch {
+            delay(120)
+            flushPendingChange()
+        }
+    }
+
+    /**
+     * Đẩy thay đổi mới nhất ngay lập tức tới clangd trước khi gửi completion hoặc signatureHelp.
+     */
+    fun flushPendingChange() {
+        if (!isDocumentOpened) {
+            pendingInitialText?.let { sendDidOpen(it) }
+        }
+
+        val textToSync = pendingChangeText ?: return
+        pendingChangeText = null
+        debounceJob?.cancel()
+
+        if (textToSync == lastSyncedText) return
+        val t = transport ?: return
+
+        val newVersion = documentVersion.incrementAndGet()
+        lastSyncedText = textToSync
+
+        val changeEvent = JSONObject().apply {
+            put("text", textToSync)
+        }
+        val params = JSONObject().apply {
+            put("textDocument", JSONObject().apply {
+                put("uri", activeDocumentUri)
+                put("version", newVersion)
+            })
+            put("contentChanges", JSONArray().apply { put(changeEvent) })
+        }
+        t.sendNotification("textDocument/didChange", params)
+    }
+
+    /**
+     * Gửi yêu cầu Auto-Completion tới clangd.
+     */
+    suspend fun requestCompletion(position: LspPosition): List<CompletionItem> = withContext(Dispatchers.IO) {
+        if (!_isLspReady.value) return@withContext emptyList()
+        val t = transport ?: return@withContext emptyList()
+
+        flushPendingChange() // Đảm bảo clangd có text mới nhất!
+
+        try {
+            val params = JSONObject().apply {
+                put("textDocument", JSONObject().apply { put("uri", activeDocumentUri) })
+                put("position", JSONObject().apply {
+                    put("line", position.line)
+                    put("character", position.character)
+                })
+            }
+
+            val response = withTimeoutOrNull(800) {
+                t.sendRequest("textDocument/completion", params)
+            } ?: return@withContext emptyList()
+
+            val resultObj = response.opt("result") ?: return@withContext emptyList()
+            val itemsArray = when (resultObj) {
+                is JSONArray -> resultObj
+                is JSONObject -> resultObj.optJSONArray("items") ?: JSONArray()
+                else -> JSONArray()
+            }
+
+            val resultList = ArrayList<CompletionItem>(itemsArray.length())
+            for (i in 0 until itemsArray.length()) {
+                val item = itemsArray.getJSONObject(i)
+                val label = item.getString("label")
+                val kind = CompletionItemKind.fromInt(item.optInt("kind", 1))
+                val detail = item.optString("detail").takeIf { it.isNotEmpty() }
+                val doc = item.opt("documentation")?.let {
+                    if (it is JSONObject) it.optString("value") else it.toString()
+                }
+
+                val insertTextFormat = item.optInt("insertTextFormat", 1)
+                val isSnippet = insertTextFormat == 2
+
+                var insertText = item.optString("insertText")
+                if (insertText.isEmpty()) {
+                    val textEdit = item.optJSONObject("textEdit")
+                    if (textEdit != null) {
+                        insertText = textEdit.optString("newText")
+                    }
+                }
+                if (insertText.isEmpty()) {
+                    insertText = label
+                }
+
+                val filterText = item.optString("filterText", label)
+                val sortText = item.optString("sortText", label)
+
+                resultList.add(
+                    CompletionItem(
+                        label = label,
+                        kind = kind,
+                        detail = detail,
+                        documentation = doc,
+                        insertText = insertText,
+                        filterText = filterText,
+                        sortText = sortText,
+                        isSnippet = isSnippet
+                    )
+                )
+            }
+
+            return@withContext resultList
+
+        } catch (e: Exception) {
+            AppLog.e("CLANGD_MGR", "Lỗi lấy completion: ${e.message}")
+            return@withContext emptyList()
+        }
+    }
+
+    /**
+     * Gửi yêu cầu Signature Help tới clangd.
+     */
+    suspend fun requestSignatureHelp(position: LspPosition): SignatureHelp? = withContext(Dispatchers.IO) {
+        if (!_isLspReady.value) return@withContext null
+        val t = transport ?: return@withContext null
+
+        flushPendingChange() // Đảm bảo clangd có text mới nhất!
+
+        try {
+            val params = JSONObject().apply {
+                put("textDocument", JSONObject().apply { put("uri", activeDocumentUri) })
+                put("position", JSONObject().apply {
+                    put("line", position.line)
+                    put("character", position.character)
+                })
+            }
+
+            val response = withTimeoutOrNull(600) {
+                t.sendRequest("textDocument/signatureHelp", params)
+            } ?: return@withContext null
+
+            val resultObj = response.optJSONObject("result") ?: return@withContext null
+            val sigArray = resultObj.optJSONArray("signatures") ?: JSONArray()
+            if (sigArray.length() == 0) return@withContext null
+
+            val activeSigIndex = resultObj.optInt("activeSignature", 0)
+            val activeParamIndex = resultObj.optInt("activeParameter", 0)
+
+            val signaturesList = ArrayList<SignatureInformation>(sigArray.length())
+            for (i in 0 until sigArray.length()) {
+                val sig = sigArray.getJSONObject(i)
+                val label = sig.getString("label")
+                val doc = sig.opt("documentation")?.let {
+                    if (it is JSONObject) it.optString("value") else it.toString()
+                }
+
+                val paramArray = sig.optJSONArray("parameters") ?: JSONArray()
+                val paramsList = ArrayList<ParameterInformation>(paramArray.length())
+
+                for (j in 0 until paramArray.length()) {
+                    val p = paramArray.getJSONObject(j)
+                    val pLabel = p.opt("label")
+                    val pLabelStr = when (pLabel) {
+                        is String -> pLabel
+                        is JSONArray -> {
+                            val start = pLabel.optInt(0, 0)
+                            val end = pLabel.optInt(1, label.length)
+                            if (start in 0..label.length && end in start..label.length) {
+                                label.substring(start, end)
+                            } else {
+                                ""
+                            }
+                        }
+                        else -> ""
+                    }
+                    val pDoc = p.opt("documentation")?.let {
+                        if (it is JSONObject) it.optString("value") else it.toString()
+                    }
+                    paramsList.add(ParameterInformation(label = pLabelStr, documentation = pDoc))
+                }
+
+                val sigActiveParam = sig.optInt("activeParameter", activeParamIndex)
+                signaturesList.add(
+                    SignatureInformation(
+                        label = label,
+                        documentation = doc,
+                        parameters = paramsList,
+                        activeParameter = sigActiveParam
+                    )
+                )
+            }
+
+            return@withContext SignatureHelp(
+                signatures = signaturesList,
+                activeSignature = activeSigIndex.coerceIn(0, (signaturesList.size - 1).coerceAtLeast(0)),
+                activeParameter = activeParamIndex
+            )
+
+        } catch (e: Exception) {
+            AppLog.e("CLANGD_MGR", "Lỗi lấy signature help: ${e.message}")
+            return@withContext null
+        }
+    }
+
+    fun stop() {
+        try {
+            transport?.sendNotification("exit", JSONObject())
+            transport?.close()
+        } catch (_: Exception) {}
+        transport = null
+        try {
+            process?.destroyForcibly()
+        } catch (_: Exception) {}
+        process = null
+        _isLspReady.value = false
+        isDocumentOpened = false
+        _currentDiagnostics.value = emptyList()
+    }
+}

@@ -84,12 +84,14 @@ object TerminalSession {
         }
     }
 
+    private val ioScope = CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+
     /**
      * Hàm này để Giao diện gọi khi người dùng bấm phím hoặc gõ Enter
      */
     fun sendInput(input: String) {
         val w = writer ?: return
-        CoroutineScope(Dispatchers.IO).launch {
+        ioScope.launch {
             try {
                 // In luôn chữ người dùng vừa gõ vào màn hình terminal (giống như gõ phím thật)
                 _terminalOutput.value += input + "\n"

@@ -49,6 +49,14 @@ object ToolchainInstaller {
                 builtins.isFile
     }
 
+    /**
+     * Kiểm tra xem binary clangd đã được cài đặt và có quyền thực thi chưa.
+     */
+    fun isClangdInstalled(context: Context): Boolean {
+        val clangd = File(context.filesDir, "usr/bin/clangd")
+        return clangd.exists() && clangd.canExecute()
+    }
+
     private const val CHANNEL_ID = "toolchain_download_channel"
     private const val NOTIFICATION_ID = 1001
 
@@ -59,11 +67,31 @@ object ToolchainInstaller {
         onStatusUpdate: (String) -> Unit,
         onComplete: () -> Unit
     ) {
+        installInternal(context, force = false, onStatusUpdate, onComplete)
+    }
+
+    /**
+     * Tải và giải nén lại gói Toolchain mới nhất từ GitHub Release (bật clangd).
+     */
+    fun reinstall(
+        context: Context,
+        onStatusUpdate: (String) -> Unit,
+        onComplete: () -> Unit
+    ) {
+        installInternal(context, force = true, onStatusUpdate, onComplete)
+    }
+
+    private fun installInternal(
+        context: Context,
+        force: Boolean,
+        onStatusUpdate: (String) -> Unit,
+        onComplete: () -> Unit
+    ) {
         val appContext = context.applicationContext
 
-        AppLog.i("TOOLCHAIN", "📦 Gọi installIfNeeded: filesDir=${appContext.filesDir}")
+        AppLog.i("TOOLCHAIN", "📦 Gọi install: filesDir=${appContext.filesDir}, force=$force")
 
-        if (isInstalled(appContext)) {
+        if (!force && isInstalled(appContext)) {
             AppLog.i("TOOLCHAIN", "✅ Clang đã được cài đặt từ trước! Bỏ qua tải về.")
             mainHandler.post { onComplete() }
             return
