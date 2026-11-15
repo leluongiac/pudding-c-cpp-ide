@@ -30,7 +30,10 @@ object ToolchainInstaller {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    fun isInstalled(context: Context): Boolean {
+    /**
+     * Kiểm tra xem bộ biên dịch Clang/Clang++ đã được cài đặt đầy đủ chưa.
+     */
+    fun isCompilerInstalled(context: Context): Boolean {
         val clang = File(context.filesDir, "usr/bin/clang")
         val clangPlus = File(context.filesDir, "usr/bin/clang++")
         val clang21 = File(context.filesDir, "usr/bin/clang-21")
@@ -55,6 +58,13 @@ object ToolchainInstaller {
     fun isClangdInstalled(context: Context): Boolean {
         val clangd = File(context.filesDir, "usr/bin/clangd")
         return clangd.exists() && clangd.canExecute()
+    }
+
+    /**
+     * Kiểm tra toàn bộ Toolchain (cả compiler và clangd language server).
+     */
+    fun isInstalled(context: Context): Boolean {
+        return isCompilerInstalled(context) && isClangdInstalled(context)
     }
 
     private const val CHANNEL_ID = "toolchain_download_channel"

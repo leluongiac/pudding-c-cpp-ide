@@ -35,7 +35,10 @@ object LspPositionUtils {
         for (i in text.indices) {
             if (currentLine == position.line) {
                 // Đã tìm thấy dòng mục tiêu
-                val lineEnd = text.indexOf('\n', lineStart).let { if (it == -1) text.length else it }
+                var lineEnd = text.indexOf('\n', lineStart).let { if (it == -1) text.length else it }
+                if (lineEnd > lineStart && text[lineEnd - 1] == '\r') {
+                    lineEnd--
+                }
                 val targetOffset = (lineStart + position.character).coerceIn(lineStart, lineEnd)
                 return targetOffset
             }
@@ -47,7 +50,11 @@ object LspPositionUtils {
 
         // Nếu position.line là dòng cuối cùng sau ký tự newline
         if (currentLine == position.line) {
-            val targetOffset = (lineStart + position.character).coerceIn(lineStart, text.length)
+            var lineEnd = text.length
+            if (lineEnd > lineStart && text[lineEnd - 1] == '\r') {
+                lineEnd--
+            }
+            val targetOffset = (lineStart + position.character).coerceIn(lineStart, lineEnd)
             return targetOffset
         }
 

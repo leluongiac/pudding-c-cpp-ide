@@ -62,6 +62,13 @@ object ToolchainEnvironment {
     }
 
     /**
+     * Kiểm tra xem toàn bộ toolchain (compiler + clangd) đã sẵn sàng chưa.
+     */
+    fun isToolchainInstalled(context: Context? = null): Boolean {
+        return isClangInstalled(context) && isClangdInstalled(context)
+    }
+
+    /**
      * Thiết lập các biến môi trường chuẩn cho clang / clangd
      */
     fun setupEnvironment(env: MutableMap<String, String>, context: Context? = null) {
